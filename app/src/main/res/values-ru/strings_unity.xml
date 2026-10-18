@@ -1,0 +1,41 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="model_opener_unity">Редактор ресурсов Unity</string>
+    <string name="unity_title">Редактор ресурсов Unity</string>
+    <string name="unity_loading">Чтение файла Unity…</string>
+    <string name="unity_bundle_format">Формат UnityFS %1$d</string>
+    <string name="unity_engine_version">Версия движка Unity: %1$s</string>
+    <string name="unity_player_version">Player: %1$s</string>
+    <string name="unity_entries_count">Записей: %1$d · данных: %2$s</string>
+    <string name="unity_select_entry">Выберите запись, чтобы просмотреть, открыть, экспортировать или заменить её.</string>
+    <string name="unity_entry_path">Путь: %1$s</string>
+    <string name="unity_entry_size">Размер: %1$s</string>
+    <string name="unity_entry_flags">Флаги: %1$s</string>
+    <string name="unity_open_entry">Открыть / изменить в Strata</string>
+    <string name="unity_export_entry">Экспортировать запись</string>
+    <string name="unity_replace_entry">Заменить запись…</string>
+    <string name="unity_repack">Пересобрать пакет</string>
+    <string name="unity_repack_busy">Пересборка пакета Unity…</string>
+    <string name="unity_repack_done">Пересобранная копия сохранена: %1$s</string>
+    <string name="unity_export_done">Экспортировано в %1$s</string>
+    <string name="unity_replace_done">Замена подготовлена. Пересоберите пакет, чтобы создать новую копию.</string>
+    <string name="unity_replacements_count">Изменено или заменено записей: %1$d</string>
+    <string name="unity_not_supported">Файл распознан как Unity, но его структура контейнера не поддерживается для редактирования.</string>
+    <string name="unity_serialized_info">Unity SerializedFile · версия %1$d · смещение данных %2$s</string>
+    <string name="unity_unknown_info">В файле не найден поддерживаемый заголовок UnityFS.</string>
+    <string name="unity_no_entries">В этом пакете UnityFS нет файлов.</string>
+    <string name="unity_parent_copy_note">Для файла внутри архива Strata создаёт отдельную пересобранную копию каждого родительского пакета. Исходные файлы остаются неизменными.</string>
+    <string name="unity_output_copy_note">Пересобранный пакет сохраняется рядом как новый файл; оригинал не перезаписывается.</string>
+    <string name="unity_error_title">Ошибка файла Unity</string>
+    <string name="unity_load_failed">Не удалось прочитать файл Unity. Возможно, он повреждён или не поддерживается.</string>
+    <string name="unity_operation_failed">Не удалось выполнить операцию. Проверьте формат, доступ к хранилищу и свободное место.</string>
+    <string name="unity_entry_changed">Не удалось прочитать выбранную запись.</string>
+    <string name="unity_sign_copy">Подписать пересобранную копию APK</string>
+    <string name="unity_sign_prompt">Пересборка APK аннулирует исходную подпись. Перед установкой подпишите эту копию встроенным инструментом Strata.</string>
+    <plurals name="unity_entries">
+        <item quantity="one">%1$d запись</item>
+        <item quantity="few">%1$d записи</item>
+        <item quantity="many">%1$d записей</item>
+        <item quantity="other">%1$d записи</item>
+    </plurals>
+</resources>

@@ -101,6 +101,7 @@ val Opener.icon: ImageVector
         Opener.PDF_READER -> Icons.Rounded.PictureAsPdf
         Opener.DEX_EDITOR -> Icons.Rounded.Code
         Opener.ARSC_EDITOR -> Icons.Rounded.DataObject
+        Opener.UNITY_ASSET -> Icons.Rounded.FolderZip
     }
 
 private data class AppChoice(val target: OpenTarget.App, val label: String, val icon: ImageBitmap?)

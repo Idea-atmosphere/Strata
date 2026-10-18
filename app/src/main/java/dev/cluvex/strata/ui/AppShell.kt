@@ -69,6 +69,7 @@ import dev.cluvex.strata.core.i18n.tr
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.LocalViewModelStoreOwner
 import androidx.lifecycle.viewmodel.compose.viewModel
+import dev.cluvex.strata.core.archive.ArchiveParent
 import dev.cluvex.strata.core.bookmarks.Bookmark
 import dev.cluvex.strata.core.bookmarks.Bookmarks
 import dev.cluvex.strata.core.data.SettingsRepository
@@ -121,6 +122,7 @@ import dev.cluvex.strata.feature.settings.ToolbarTab
 import dev.cluvex.strata.feature.share.ShareScreen
 import dev.cluvex.strata.feature.termux.LanguagesScreen
 import dev.cluvex.strata.feature.trash.RecycleBinScreen
+import dev.cluvex.strata.feature.unity.UnityAssetScreen
 import dev.cluvex.strata.ui.drawer.DrawerActions
 import dev.cluvex.strata.ui.drawer.StrataDrawerContent
 import java.io.File
@@ -141,7 +143,8 @@ sealed interface Route {
     data class Hex(val path: String) : Route
     data class Search(val root: String) : Route
     data class ApkInfo(val path: String) : Route
-    data class Archive(val path: String) : Route
+    data class Archive(val path: String, val parents: List<ArchiveParent> = emptyList()) : Route
+    data class UnityAsset(val path: String, val parents: List<ArchiveParent> = emptyList()) : Route
     data class Image(val path: String) : Route
     data class Video(val path: String) : Route
     data class Font(val path: String) : Route
@@ -159,8 +162,8 @@ sealed interface Route {
 }
 
 private sealed interface OpenDialog {
-    data class Apk(val path: String) : OpenDialog
-    data class SplitInstall(val path: String) : OpenDialog
+    data class Apk(val path: String, val parents: List<ArchiveParent> = emptyList()) : OpenDialog
+    data class SplitInstall(val path: String, val parents: List<ArchiveParent> = emptyList()) : OpenDialog
     data class OpenWith(val item: FileItem) : OpenDialog
     data class SignApk(val item: FileItem) : OpenDialog
     data class Music(val path: String) : OpenDialog
@@ -172,6 +175,7 @@ private class ShellActions(
     val pop: () -> Unit,
     val replace: (Route) -> Unit,
     val openFile: (FileItem) -> Unit,
+    val openNestedFile: (File, List<ArchiveParent>) -> Unit,
     val openWith: (FileItem) -> Unit,
     val openWithOpener: (FileItem, Opener) -> Unit,
     val signApk: (FileItem) -> Unit,
@@ -270,6 +274,7 @@ fun AppShell(
             Opener.PDF_READER -> stack.push(Route.Pdf(item.path, null))
             Opener.DEX_EDITOR -> stack.push(Route.Dex(item.path))
             Opener.ARSC_EDITOR -> stack.push(Route.Arsc(item.path, null))
+            Opener.UNITY_ASSET -> stack.push(Route.UnityAsset(item.path))
         }
     }
 
@@ -279,6 +284,22 @@ fun AppShell(
             is OpenTarget.BuiltIn -> openWith(item, target.opener)
             is OpenTarget.App ->
                 if (!IntentUtils.openIn(context, item, target.packageName, target.activity)) openDialog = OpenDialog.OpenWith(item)
+        }
+    }
+
+    fun openNestedFile(file: File, parents: List<ArchiveParent>) {
+        val item = FileItem.of(file)
+        when (val target = OpenResolver.resolve(item, settings.openDefaults)) {
+            null -> openDialog = OpenDialog.OpenWith(item)
+            is OpenTarget.App ->
+                if (!IntentUtils.openIn(context, item, target.packageName, target.activity)) openDialog = OpenDialog.OpenWith(item)
+            is OpenTarget.BuiltIn -> when (target.opener) {
+                Opener.UNITY_ASSET -> stack.push(Route.UnityAsset(file.path, parents))
+                Opener.ARCHIVE_VIEWER -> stack.push(Route.Archive(file.path, parents))
+                Opener.APK_VIEWER -> openDialog = OpenDialog.Apk(file.path, parents)
+                Opener.SPLIT_APK_INSTALLER -> openDialog = OpenDialog.SplitInstall(file.path, parents)
+                else -> openWith(item, target.opener)
+            }
         }
     }
 
@@ -293,6 +314,7 @@ fun AppShell(
         pop = { stack.pop() },
         replace = { stack.replace(it) },
         openFile = { openFile(it) },
+        openNestedFile = { file, parents -> openNestedFile(file, parents) },
         openWith = { openDialog = OpenDialog.OpenWith(it) },
         openWithOpener = { item, opener -> openWith(item, opener) },
         signApk = { openDialog = OpenDialog.SignApk(it) },
@@ -409,7 +431,7 @@ fun AppShell(
                     saveable.SaveableStateProvider(entry.key) {
                         CompositionLocalProvider(LocalViewModelStoreOwner provides entry) {
                             Surface(Modifier.fillMaxSize(), color = MaterialTheme.colorScheme.background) {
-                                Screen(entry.route, settings, settingsRepo, vm, actions)
+                                Screen(entry.route, settings, settingsRepo, vm, actions, stack.top?.key ?: 0L)
                             }
                         }
                     }
@@ -430,7 +452,7 @@ fun AppShell(
             path = d.path,
             policy = policy,
             actions = ApkDialogActions(
-                onView = { stack.push(Route.Archive(d.path)) },
+                onView = { stack.push(Route.Archive(d.path, d.parents)) },
                 onSign = { openDialog = OpenDialog.SignApk(FileItem.of(File(d.path))) },
                 onDetails = { openDialog = null; stack.push(Route.ApkInfo(d.path)) },
                 onDexTools = { openDialog = null; stack.push(Route.Dex(d.path)) },
@@ -442,7 +464,7 @@ fun AppShell(
         is OpenDialog.SplitInstall -> SplitInstallDialog(
             path = d.path,
             policy = policy,
-            onView = { stack.push(Route.Archive(d.path)) },
+            onView = { stack.push(Route.Archive(d.path, d.parents)) },
             onDismiss = { openDialog = null },
         )
         is OpenDialog.OpenWith -> OpenWithDialog(
@@ -488,6 +510,7 @@ private fun Screen(
     settingsRepo: SettingsRepository,
     vm: ExplorerViewModel,
     actions: ShellActions,
+    refreshToken: Long,
 ) {
     when (r) {
         Route.Files -> Unit
@@ -563,7 +586,19 @@ private fun Screen(
                 onSignApk = { p -> actions.signApk(FileItem.of(File(p))) },
                 onLocate = actions.locate,
                 onOpenArsc = { archive, entry -> actions.push(Route.Arsc(archive, entry)) },
+                onOpenEntry = { archive, entry, materialized ->
+                    actions.openNestedFile(materialized, r.parents + ArchiveParent(archive, entry.path))
+                },
             ),
+        )
+        is Route.UnityAsset -> UnityAssetScreen(
+            path = r.path,
+            parents = r.parents,
+            refreshToken = refreshToken,
+            onBack = actions.pop,
+            onOpenFile = actions.openFile,
+            onSignApk = { file -> actions.signApk(FileItem.of(file)) },
+            onLocate = actions.locate,
         )
         is Route.Image -> ImageViewerScreen(
             path = r.path,

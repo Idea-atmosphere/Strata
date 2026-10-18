@@ -6,6 +6,8 @@ import dev.cluvex.strata.R
 import dev.cluvex.strata.core.model.FileItem
 import dev.cluvex.strata.core.util.FileKind
 import dev.cluvex.strata.core.util.FileKinds
+import dev.cluvex.strata.core.unity.UnityBundleReader
+import java.io.File
 
 enum class Opener(@StringRes val label: Int) {
     APK_VIEWER(R.string.model_opener_apk),
@@ -23,6 +25,7 @@ enum class Opener(@StringRes val label: Int) {
     FONT_VIEWER(R.string.model_opener_font),
     DEX_EDITOR(R.string.model_opener_dex),
     ARSC_EDITOR(R.string.model_opener_arsc),
+    UNITY_ASSET(R.string.model_opener_unity),
 }
 
 sealed interface OpenTarget {
@@ -67,6 +70,8 @@ object OpenResolver {
             ext in splitBundles -> Opener.SPLIT_APK_INSTALLER
             ext == "dex" || ext == "odex" -> Opener.DEX_EDITOR
             ext == "arsc" -> Opener.ARSC_EDITOR
+            ext == "obb" -> Opener.ARCHIVE_VIEWER
+            UnityBundleReader.isUnityRelated(item.name) || (File(item.path).isFile && UnityBundleReader.probe(File(item.path)).kind != dev.cluvex.strata.core.unity.UnityFileKind.UNKNOWN) -> Opener.UNITY_ASSET
             ext in browsable -> Opener.ARCHIVE_VIEWER
             ext in fonts -> Opener.FONT_VIEWER
             ext in markdown -> Opener.MARKDOWN_VIEWER
@@ -92,7 +97,7 @@ object OpenResolver {
     private val anyFile = listOf(
         Opener.TEXT_EDITOR, Opener.MARKDOWN_VIEWER, Opener.PDF_READER, Opener.HEX_EDITOR, Opener.ARCHIVE_VIEWER, Opener.IMAGE_VIEWER, Opener.NINE_PATCH_EDITOR,
         Opener.MUSIC_PLAYER, Opener.VIDEO_PLAYER, Opener.FONT_VIEWER, Opener.APK_VIEWER,
-        Opener.SPLIT_APK_INSTALLER, Opener.DEX_EDITOR, Opener.ARSC_EDITOR, Opener.SIGNING_KEY,
+        Opener.SPLIT_APK_INSTALLER, Opener.DEX_EDITOR, Opener.ARSC_EDITOR, Opener.SIGNING_KEY, Opener.UNITY_ASSET,
     )
 
     fun candidates(item: FileItem): List<Opener> = (listOfNotNull(builtIn(item)) + anyFile).distinct()

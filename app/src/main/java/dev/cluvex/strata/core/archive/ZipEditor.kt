@@ -27,6 +27,15 @@ object ZipEditor {
 
     fun put(zip: File, entry: String, content: File) = putAll(zip, mapOf(ArchiveTree.normalize(entry) to content))
 
+    fun replace(zip: File, entry: String, content: File) {
+        val normalized = ArchiveTree.normalize(entry)
+        ZipFile(zip).use { z ->
+            checkEditable(z)
+            if (z.getFileHeader(normalized) == null) throw IOException(tr(R.string.archive_not_in_archive, normalized))
+        }
+        put(zip, normalized, content)
+    }
+
     fun delete(zip: File, paths: Collection<String>): Int = ZipFile(zip).use { z ->
         checkEditable(z)
         val names = matching(z, paths)

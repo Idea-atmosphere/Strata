@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="model_opener_unity">Unity asset editor</string>
+    <string name="unity_title">Unity asset editor</string>
+    <string name="unity_loading">Reading Unity file…</string>
+    <string name="unity_bundle_format">UnityFS format %1$d</string>
+    <string name="unity_engine_version">Unity engine: %1$s</string>
+    <string name="unity_player_version">Player: %1$s</string>
+    <string name="unity_entries_count">%1$d entries · %2$s data</string>
+    <string name="unity_select_entry">Select an entry to inspect, open, export, or replace it.</string>
+    <string name="unity_entry_path">Path: %1$s</string>
+    <string name="unity_entry_size">Size: %1$s</string>
+    <string name="unity_entry_flags">Flags: %1$s</string>
+    <string name="unity_open_entry">Open / edit with Strata</string>
+    <string name="unity_export_entry">Export entry</string>
+    <string name="unity_replace_entry">Replace entry…</string>
+    <string name="unity_repack">Rebuild bundle</string>
+    <string name="unity_repack_busy">Rebuilding Unity bundle…</string>
+    <string name="unity_repack_done">A rebuilt copy was saved to %1$s</string>
+    <string name="unity_export_done">Exported to %1$s</string>
+    <string name="unity_replace_done">Replacement staged. Rebuild the bundle to create a new copy.</string>
+    <string name="unity_replacements_count">Edited or replaced entries: %1$d</string>
+    <string name="unity_not_supported">This Unity file was recognized, but its container layout is not supported for editing.</string>
+    <string name="unity_serialized_info">Unity SerializedFile · version %1$d · data offset %2$s</string>
+    <string name="unity_unknown_info">The file does not have a supported UnityFS header.</string>
+    <string name="unity_no_entries">This UnityFS bundle contains no files.</string>
+    <string name="unity_parent_copy_note">For a file inside an archive, Strata rebuilds a separate copy of every parent package. The original files remain unchanged.</string>
+    <string name="unity_output_copy_note">The rebuilt bundle is saved as a new sibling file; the original is never overwritten.</string>
+    <string name="unity_error_title">Unity file error</string>
+    <string name="unity_load_failed">Could not read this Unity file. It may be damaged or unsupported.</string>
+    <string name="unity_operation_failed">Operation failed. Check the file format, storage access, and available space.</string>
+    <string name="unity_entry_changed">The selected entry could not be read.</string>
+    <string name="unity_sign_copy">Sign rebuilt APK copy</string>
+    <string name="unity_sign_prompt">Rebuilding an APK invalidates its original signature. Sign this copied APK with Strata’s existing signing tool before installing it.</string>
+    <plurals name="unity_entries">
+        <item quantity="one">%1$d entry</item>
+        <item quantity="other">%1$d entries</item>
+    </plurals>
+</resources>

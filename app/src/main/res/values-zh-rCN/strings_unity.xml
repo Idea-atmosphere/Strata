@@ -1,0 +1,38 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="model_opener_unity">Unity 资源编辑器</string>
+    <string name="unity_title">Unity 资源编辑器</string>
+    <string name="unity_loading">正在读取 Unity 文件…</string>
+    <string name="unity_bundle_format">UnityFS 格式 %1$d</string>
+    <string name="unity_engine_version">Unity 引擎：%1$s</string>
+    <string name="unity_player_version">Player：%1$s</string>
+    <string name="unity_entries_count">%1$d 个条目 · 数据 %2$s</string>
+    <string name="unity_select_entry">选择条目以检查、打开、导出或替换。</string>
+    <string name="unity_entry_path">路径：%1$s</string>
+    <string name="unity_entry_size">大小：%1$s</string>
+    <string name="unity_entry_flags">标志：%1$s</string>
+    <string name="unity_open_entry">使用 Strata 打开 / 编辑</string>
+    <string name="unity_export_entry">导出条目</string>
+    <string name="unity_replace_entry">替换条目…</string>
+    <string name="unity_repack">重建资源包</string>
+    <string name="unity_repack_busy">正在重建 Unity 资源包…</string>
+    <string name="unity_repack_done">重建副本已保存到 %1$s</string>
+    <string name="unity_export_done">已导出到 %1$s</string>
+    <string name="unity_replace_done">替换已暂存。请重建资源包以生成新副本。</string>
+    <string name="unity_replacements_count">已编辑或替换条目：%1$d</string>
+    <string name="unity_not_supported">已识别此 Unity 文件，但不支持编辑其容器布局。</string>
+    <string name="unity_serialized_info">Unity SerializedFile · 版本 %1$d · 数据偏移 %2$s</string>
+    <string name="unity_unknown_info">文件中没有受支持的 UnityFS 标头。</string>
+    <string name="unity_no_entries">此 UnityFS 资源包不包含文件。</string>
+    <string name="unity_parent_copy_note">如果文件位于归档中，Strata 会为每个父级资源包创建单独的重建副本。原文件不会更改。</string>
+    <string name="unity_output_copy_note">重建后的资源包会作为新文件保存在原文件旁边；不会覆盖原文件。</string>
+    <string name="unity_error_title">Unity 文件错误</string>
+    <string name="unity_load_failed">无法读取此 Unity 文件。文件可能已损坏或不受支持。</string>
+    <string name="unity_operation_failed">操作失败。请检查文件格式、存储访问权限和可用空间。</string>
+    <string name="unity_entry_changed">无法读取所选条目。</string>
+    <string name="unity_sign_copy">签署重建后的 APK 副本</string>
+    <string name="unity_sign_prompt">重建 APK 会使原签名失效。安装前，请使用 Strata 现有签名工具为此副本签名。</string>
+    <plurals name="unity_entries">
+        <item quantity="other">%1$d 个条目</item>
+    </plurals>
+</resources>

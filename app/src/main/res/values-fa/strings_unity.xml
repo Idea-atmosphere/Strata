@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="model_opener_unity">ویرایشگر فایل‌های Unity</string>
+    <string name="unity_title">ویرایشگر فایل‌های Unity</string>
+    <string name="unity_loading">در حال خواندن فایل Unity…</string>
+    <string name="unity_bundle_format">قالب UnityFS %1$d</string>
+    <string name="unity_engine_version">نسخهٔ موتور Unity: %1$s</string>
+    <string name="unity_player_version">Player: %1$s</string>
+    <string name="unity_entries_count">%1$d ورودی · %2$s داده</string>
+    <string name="unity_select_entry">برای بررسی، بازکردن، خروجی‌گرفتن یا جایگزینی، یک ورودی انتخاب کنید.</string>
+    <string name="unity_entry_path">مسیر: %1$s</string>
+    <string name="unity_entry_size">اندازه: %1$s</string>
+    <string name="unity_entry_flags">پرچم‌ها: %1$s</string>
+    <string name="unity_open_entry">بازکردن / ویرایش با Strata</string>
+    <string name="unity_export_entry">خروجی‌گرفتن از ورودی</string>
+    <string name="unity_replace_entry">جایگزینی ورودی…</string>
+    <string name="unity_repack">بازسازی بسته</string>
+    <string name="unity_repack_busy">در حال بازسازی بستهٔ Unity…</string>
+    <string name="unity_repack_done">نسخهٔ بازسازی‌شده در %1$s ذخیره شد</string>
+    <string name="unity_export_done">در %1$s خروجی گرفته شد</string>
+    <string name="unity_replace_done">جایگزین آماده شد. برای ساخت نسخهٔ تازه، بسته را بازسازی کنید.</string>
+    <string name="unity_replacements_count">ورودی‌های ویرایش یا جایگزین‌شده: %1$d</string>
+    <string name="unity_not_supported">این فایل به‌عنوان فایل Unity شناسایی شد، اما ساختار بسته برای ویرایش پشتیبانی نمی‌شود.</string>
+    <string name="unity_serialized_info">Unity SerializedFile · نسخهٔ %1$d · جابه‌جایی داده %2$s</string>
+    <string name="unity_unknown_info">سرآیند UnityFS پشتیبانی‌شده‌ای در این فایل پیدا نشد.</string>
+    <string name="unity_no_entries">این بستهٔ UnityFS فایلی ندارد.</string>
+    <string name="unity_parent_copy_note">اگر فایل داخل یک آرشیو باشد، Strata از هر بستهٔ والد یک نسخهٔ جداگانه بازسازی می‌کند؛ فایل‌های اصلی تغییر نمی‌کنند.</string>
+    <string name="unity_output_copy_note">بستهٔ بازسازی‌شده به‌صورت فایل تازه در کنار فایل اصلی ذخیره می‌شود؛ فایل اصلی بازنویسی نمی‌شود.</string>
+    <string name="unity_error_title">خطای فایل Unity</string>
+    <string name="unity_load_failed">خواندن فایل Unity ممکن نشد؛ ممکن است فایل خراب باشد یا پشتیبانی نشود.</string>
+    <string name="unity_operation_failed">عملیات انجام نشد. قالب فایل، دسترسی ذخیره‌سازی و فضای خالی را بررسی کنید.</string>
+    <string name="unity_entry_changed">خواندن ورودی انتخاب‌شده ممکن نشد.</string>
+    <string name="unity_sign_copy">امضای نسخهٔ بازسازی‌شدهٔ APK</string>
+    <string name="unity_sign_prompt">بازسازی APK امضای اصلی آن را باطل می‌کند. پیش از نصب، این کپی APK را با ابزار امضای موجود Strata امضا کنید.</string>
+    <plurals name="unity_entries">
+        <item quantity="one">%1$d ورودی</item>
+        <item quantity="other">%1$d ورودی</item>
+    </plurals>
+</resources>

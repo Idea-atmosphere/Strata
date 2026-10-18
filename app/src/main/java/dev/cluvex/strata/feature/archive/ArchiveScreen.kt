@@ -95,6 +95,7 @@ data class ArchiveActions(
     val onSignApk: (String) -> Unit,
     val onLocate: (folder: String, reveal: String?) -> Unit,
     val onOpenArsc: (archive: String, entry: String) -> Unit,
+    val onOpenEntry: (archive: String, entry: ArchiveEntry, materialized: File) -> Unit,
 )
 
 private sealed interface ArchiveDialog {
@@ -166,7 +167,7 @@ fun ArchiveScreen(
         }
         scope.launch {
             try {
-                actions.onOpenFile(vm.materialize(entry))
+                actions.onOpenEntry(s.path, entry, vm.materialize(entry))
             } catch (e: PasswordRequiredException) {
                 pendingOpen = entry
                 dialog = ArchiveDialog.Password

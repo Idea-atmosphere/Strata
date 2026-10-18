@@ -81,7 +81,7 @@ class ArchiveTree(entries: List<ArchiveEntry>) {
 
 object ArchiveReader {
 
-    private val zipSuffixes = listOf(".zip", ".jar", ".apk", ".apks", ".xapk", ".apkm", ".war", ".aar")
+    private val zipSuffixes = listOf(".zip", ".jar", ".apk", ".apks", ".xapk", ".apkm", ".obb", ".war", ".aar")
     private val tarballSuffixes = listOf(".tar.gz", ".tgz", ".tar.bz2", ".tbz2", ".tar.xz", ".txz", ".tar.zst", ".tar.zstd", ".tar.lz4", ".tar")
     private val singleSuffixes = listOf(".gz", ".bz2", ".xz", ".zst", ".zstd", ".lz4")
 
