@@ -33,7 +33,8 @@ data class UnityProbe(
     val dataOffset: Long? = null,
     val note: String? = null,
 ) {
-    val bundleSupported: Boolean get() = kind == UnityFileKind.UNITY_FS
+    /** True when the built-in browser can open and list this kind. Repacking may still be unsupported. */
+    val bundleSupported: Boolean get() = kind != UnityFileKind.UNKNOWN
 }
 
 data class UnityBundleEntry(
@@ -68,6 +69,9 @@ class UnityBundleDocument internal constructor(
     internal val dataFile: File,
 ) : Closeable {
 
+    /** Repacking is implemented for UnityFS only; legacy bundles and serialized files are read-only. */
+    val repackSupported: Boolean get() = summary.signature == "UnityFS"
+
     fun copyEntry(entry: UnityBundleEntry, output: File) {
         requireEntry(entry)
         output.parentFile?.mkdirs()
@@ -87,6 +91,7 @@ class UnityBundleDocument internal constructor(
 
     /** Writes a normalized UnityFS bundle. Inputs are never overwritten. */
     fun repack(output: File, replacements: Map<String, File> = emptyMap()) {
+        if (!repackSupported) throw UnityFormatException("This Unity format is read-only; repacking needs a UnityFS bundle")
         if (output.canonicalFile == source.canonicalFile) throw IOException("Output must not replace the source bundle")
         if (output.exists()) throw IOException("Output already exists: ${output.name}")
         val unknown = replacements.keys - summary.entries.map { it.name }.toSet()
@@ -231,7 +236,7 @@ class UnityBundleDocument internal constructor(
 }
 
 
-private fun copyExactly(input: InputStream, output: OutputStream, length: Long): Long {
+internal fun copyExactly(input: InputStream, output: OutputStream, length: Long): Long {
     if (length < 0) throw UnityFormatException("Negative UnityFS block length")
     val buffer = ByteArray(64 * 1024)
     var left = length
@@ -246,7 +251,7 @@ private fun copyExactly(input: InputStream, output: OutputStream, length: Long):
     return copied
 }
 
-private fun copyExactly(input: RandomAccessFile, output: OutputStream, length: Long): Long {
+internal fun copyExactly(input: RandomAccessFile, output: OutputStream, length: Long): Long {
     if (length < 0) throw UnityFormatException("Negative UnityFS block length")
     val buffer = ByteArray(64 * 1024)
     var left = length
@@ -261,7 +266,7 @@ private fun copyExactly(input: RandomAccessFile, output: OutputStream, length: L
     return copied
 }
 
-private fun checkedAdd(a: Long, b: Long, message: String): Long {
+internal fun checkedAdd(a: Long, b: Long, message: String): Long {
     if (b < 0 || a > Long.MAX_VALUE - b) throw UnityFormatException(message)
     return a + b
 }
@@ -325,7 +330,12 @@ object UnityBundleReader {
         cache.mkdirs()
         val dataFile = File(cache, "bundle-data.bin")
         try {
-            val summary = parseUnityFs(file, dataFile)
+            val summary = when (probe(file).kind) {
+                UnityFileKind.UNITY_FS -> parseUnityFs(file, dataFile)
+                UnityFileKind.UNITY_WEB, UnityFileKind.UNITY_RAW -> UnityLegacyReader.parse(file, dataFile)
+                UnityFileKind.SERIALIZED_FILE -> SerializedFileReader.parse(file, dataFile)
+                UnityFileKind.UNKNOWN -> throw UnityFormatException("Not a Unity file: ${file.name}")
+            }
             return UnityBundleDocument(file, summary, dataFile)
         } catch (e: Throwable) {
             dataFile.delete()
@@ -454,6 +464,10 @@ object UnityBundleReader {
     private fun decompressLzma(input: InputStream, expected: Long, output: OutputStream): Long {
         val properties = ByteArray(5)
         readFully(input, properties)
+        return decompressLzmaRaw(input, expected, output, properties)
+    }
+
+    internal fun decompressLzmaRaw(input: InputStream, expected: Long, output: OutputStream, properties: ByteArray): Long {
         val dictRaw = ((properties[1].toLong() and 0xFF) or
             ((properties[2].toLong() and 0xFF) shl 8) or
             ((properties[3].toLong() and 0xFF) shl 16) or
@@ -537,8 +551,8 @@ object UnityBundleReader {
             if (version !in 9..100) return@use UnityProbe(UnityFileKind.UNKNOWN, signature, note = "Unknown Unity file signature")
             val endian = input.readUnsignedByte()
             input.skipBytes(3)
-            if (version >= 22 && input.filePointer + 32 <= input.length()) {
-                val extendedMetadata = input.readLong()
+            if (version >= 22 && input.filePointer + 28 <= input.length()) {
+                val extendedMetadata = readU32(input)
                 val extendedSize = input.readLong()
                 val extendedOffset = input.readLong()
                 input.readLong()
@@ -548,7 +562,7 @@ object UnityBundleReader {
                     dataOffset = extendedOffset
                 }
             }
-            val headerSize = if (version >= 22) 52L else 20L
+            val headerSize = if (version >= 22) 48L else 20L
             val plausible = metadataSize in 1..file.length() &&
                 declaredSize in headerSize..file.length() &&
                 dataOffset in headerSize..declaredSize &&
@@ -561,7 +575,7 @@ object UnityBundleReader {
 
     private fun align16(value: Long): Long = (value + 15L) and -16L
 
-    private fun readCString(input: RandomAccessFile, max: Int): String {
+    internal fun readCString(input: RandomAccessFile, max: Int): String {
         val bytes = ByteArrayOutputStream()
         while (bytes.size() < max) {
             val b = input.read()
@@ -572,9 +586,9 @@ object UnityBundleReader {
         throw UnityFormatException("UnityFS string is too long")
     }
 
-    private fun readU32(input: RandomAccessFile): Long = input.readInt().toLong() and 0xFFFF_FFFFL
+    internal fun readU32(input: RandomAccessFile): Long = input.readInt().toLong() and 0xFFFF_FFFFL
 
-    private fun readFully(input: InputStream, bytes: ByteArray) {
+    internal fun readFully(input: InputStream, bytes: ByteArray) {
         var p = 0
         while (p < bytes.size) {
             val n = input.read(bytes, p, bytes.size - p)
@@ -583,31 +597,63 @@ object UnityBundleReader {
         }
     }
 
-    private class Cursor(private val bytes: ByteArray) {
+    internal class Cursor(private val bytes: ByteArray, private val bigEndian: Boolean = true) {
         private var position = 0
         val remaining: Int get() = bytes.size - position
 
+        fun align4() {
+            position = (position + 3) and 3.inv()
+        }
+
+        fun readU8(): Int {
+            requireBytes(1)
+            return bytes[position++].toInt() and 0xFF
+        }
+
         fun readU16(): Int {
             requireBytes(2)
-            val value = ((bytes[position].toInt() and 0xFF) shl 8) or (bytes[position + 1].toInt() and 0xFF)
+            val value = if (bigEndian) {
+                ((bytes[position].toInt() and 0xFF) shl 8) or (bytes[position + 1].toInt() and 0xFF)
+            } else {
+                (bytes[position].toInt() and 0xFF) or ((bytes[position + 1].toInt() and 0xFF) shl 8)
+            }
             position += 2
             return value
         }
 
+        fun readI16(): Int {
+            val value = readU16()
+            return if (value and 0x8000 != 0) value - 0x10000 else value
+        }
+
         fun readU32(): Long {
             requireBytes(4)
-            val value = ((bytes[position].toLong() and 0xFF) shl 24) or
-                ((bytes[position + 1].toLong() and 0xFF) shl 16) or
-                ((bytes[position + 2].toLong() and 0xFF) shl 8) or
-                (bytes[position + 3].toLong() and 0xFF)
+            val value = if (bigEndian) {
+                ((bytes[position].toLong() and 0xFF) shl 24) or
+                    ((bytes[position + 1].toLong() and 0xFF) shl 16) or
+                    ((bytes[position + 2].toLong() and 0xFF) shl 8) or
+                    (bytes[position + 3].toLong() and 0xFF)
+            } else {
+                (bytes[position].toLong() and 0xFF) or
+                    ((bytes[position + 1].toLong() and 0xFF) shl 8) or
+                    ((bytes[position + 2].toLong() and 0xFF) shl 16) or
+                    ((bytes[position + 3].toLong() and 0xFF) shl 24)
+            }
             position += 4
             return value
         }
 
+        fun readI32(): Int = readU32().toInt()
+
         fun readI64(): Long {
             requireBytes(8)
             var value = 0L
-            repeat(8) { value = (value shl 8) or (bytes[position++].toLong() and 0xFF) }
+            if (bigEndian) {
+                repeat(8) { value = (value shl 8) or (bytes[position++].toLong() and 0xFF) }
+            } else {
+                for (i in 7 downTo 0) value = (value shl 8) or (bytes[position + i].toLong() and 0xFF)
+                position += 8
+            }
             return value
         }
 
@@ -625,7 +671,7 @@ object UnityBundleReader {
             return value
         }
 
-        private fun requireBytes(count: Int) {
+        internal fun requireBytes(count: Int) {
             if (count < 0 || count > remaining) throw UnityFormatException("UnityFS block table is truncated")
         }
     }

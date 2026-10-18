@@ -95,6 +95,63 @@ class UnityBundleReaderTest {
         }
     }
 
+    @Test
+    fun readsLegacyUnityRawBundle() {
+        val contents = "legacy unity payload".toByteArray()
+        val source = writeLegacy(temp.root, "legacy.raw", contents, web = false)
+        assertThat(UnityBundleReader.probe(source).kind).isEqualTo(UnityFileKind.UNITY_RAW)
+        UnityBundleReader.open(source, File(temp.root, "cache")).use { document ->
+            assertThat(document.summary.entries.map { it.name }).containsExactly("assets/data.bin")
+            val extracted = File(temp.root, "legacy-out.bin")
+            document.copyEntry(document.summary.entries.single(), extracted)
+            assertThat(extracted.readBytes()).isEqualTo(contents)
+            assertThat(document.repackSupported).isFalse()
+            assertThrows(java.io.IOException::class.java) {
+                document.repack(File(temp.root, "should-not-exist.bundle"))
+            }
+        }
+    }
+
+    @Test
+    fun decompressesLegacyUnityWebBundle() {
+        val contents = "compressed legacy payload".toByteArray()
+        val source = writeLegacy(temp.root, "legacy.web", contents, web = true)
+        assertThat(UnityBundleReader.probe(source).kind).isEqualTo(UnityFileKind.UNITY_WEB)
+        UnityBundleReader.open(source, File(temp.root, "cache")).use { document ->
+            val extracted = File(temp.root, "web-out.bin")
+            document.copyEntry(document.summary.entries.single(), extracted)
+            assertThat(extracted.readBytes()).isEqualTo(contents)
+        }
+    }
+
+    @Test
+    fun listsSerializedFileObjectsAndExtractsRawBytes() {
+        val source = writeSerialized(temp.root, "level.assets", version = 17)
+        assertThat(UnityBundleReader.probe(source).kind).isEqualTo(UnityFileKind.SERIALIZED_FILE)
+        UnityBundleReader.open(source, File(temp.root, "cache")).use { document ->
+            assertThat(document.summary.entries.map { it.name })
+                .containsExactly("#101 TextAsset", "#102 TextAsset")
+                .inOrder()
+            val first = File(temp.root, "object-1.bin")
+            val second = File(temp.root, "object-2.bin")
+            document.copyEntry(document.summary.entries[0], first)
+            document.copyEntry(document.summary.entries[1], second)
+            assertThat(first.readText()).isEqualTo("hello")
+            assertThat(second.readText()).isEqualTo("world")
+            assertThat(document.repackSupported).isFalse()
+        }
+    }
+
+    @Test
+    fun refusesSerializedFileVersionOutsideSupportedRange() {
+        val source = writeSerialized(temp.root, "future.assets", version = 23)
+        assertThat(UnityBundleReader.probe(source).kind).isEqualTo(UnityFileKind.SERIALIZED_FILE)
+        val error = assertThrows(UnityFormatException::class.java) {
+            UnityBundleReader.open(source, File(temp.root, "cache"))
+        }
+        assertThat(error).hasMessageThat().contains("Unsupported serialized file version")
+    }
+
     private fun writeBundle(
         root: File,
         name: String,
@@ -148,6 +205,128 @@ class UnityBundleReaderTest {
                 out.writeInt(0x40)
                 out.write(info)
                 out.write(compressed)
+            }
+        }
+        return output
+    }
+
+    /** Legacy UnityRaw / UnityWeb container (big-endian header) with a single entry. */
+    private fun writeLegacy(root: File, name: String, contents: ByteArray, web: Boolean): File {
+        val signature = if (web) "UnityWeb" else "UnityRaw"
+        fun header(headerSize: Int, compressedSize: Int, uncompressedSize: Int): ByteArray =
+            ByteArrayOutputStream().use { bytes ->
+                DataOutputStream(bytes).use { out ->
+                    out.write(signature.toByteArray(Charsets.UTF_8))
+                    out.writeByte(0)
+                    out.writeInt(6) // format version
+                    out.write("5.x.x".toByteArray(Charsets.UTF_8)); out.writeByte(0)
+                    out.write("2019.4.0f1".toByteArray(Charsets.UTF_8)); out.writeByte(0)
+                    out.write(ByteArray(16)); out.writeInt(0) // hash + crc (version >= 4)
+                    out.writeInt(0)                           // minimum streamed bytes
+                    out.writeInt(headerSize)
+                    out.writeInt(0)                           // levels before streaming
+                    out.writeInt(1)                           // level count
+                    out.writeInt(compressedSize)
+                    out.writeInt(uncompressedSize)
+                    out.writeInt(headerSize + compressedSize) // complete file size (version >= 2)
+                    out.writeInt(headerSize)                  // file info header size (version >= 3)
+                }
+                bytes.toByteArray()
+            }
+        val headerSize = header(0, 0, 0).size // Every field is fixed width.
+        val directory = ByteArrayOutputStream().use { bytes ->
+            DataOutputStream(bytes).use { out ->
+                out.writeInt(1) // node count
+                out.write("assets/data.bin".toByteArray(Charsets.UTF_8))
+                out.writeByte(0)
+                out.writeInt(0) // absolute data offset, patched below
+                out.writeInt(contents.size)
+            }
+            bytes.toByteArray()
+        }
+        val dataOffset = headerSize + directory.size
+        directory[20] = (dataOffset ushr 24).toByte()
+        directory[21] = (dataOffset ushr 16).toByte()
+        directory[22] = (dataOffset ushr 8).toByte()
+        directory[23] = dataOffset.toByte()
+        val stream = directory + contents
+        val compressed = if (web) lzmaAlone(stream) else stream
+        val output = File(root, name)
+        FileOutputStream(output).use { it.write(header(headerSize, compressed.size, stream.size) + compressed) }
+        return output
+    }
+
+    /** LZMA1 stream with the 13-byte "alone" prefix (props + dictionary + size), as Unity emits. */
+    private fun lzmaAlone(payload: ByteArray): ByteArray {
+        val raw = ByteArrayOutputStream()
+        org.tukaani.xz.LZMAOutputStream(raw, org.tukaani.xz.LZMA2Options(), false).use { it.write(payload) }
+        val dictionary = 1 shl 23 // 8 MiB
+        val header = byteArrayOf(0x5D) + // lc = 3, lp = 0, pb = 2
+            byteArrayOf(
+                dictionary.toByte(),
+                (dictionary ushr 8).toByte(),
+                (dictionary ushr 16).toByte(),
+                (dictionary ushr 24).toByte(),
+            ) +
+            ByteArray(8) { index -> ((payload.size.toLong() ushr (8 * index)) and 0xFF).toByte() }
+        return header + raw.toByteArray()
+    }
+
+    /** Serialized file with a big-endian header, one TextAsset type and two small objects. */
+    private fun writeSerialized(root: File, name: String, version: Int): File {
+        val metadata = ByteArrayOutputStream()
+        fun int(value: Long) = metadata.write(
+            byteArrayOf(
+                value.toByte(),
+                (value ushr 8).toByte(),
+                (value ushr 16).toByte(),
+                (value ushr 24).toByte(),
+            ),
+        )
+        fun align() = metadata.write(ByteArray((4 - metadata.size() % 4) % 4))
+        metadata.write("2021.3.0f1".toByteArray(Charsets.UTF_8)); metadata.write(0) // unity version
+        int(13)          // build target (version >= 8)
+        metadata.write(1) // enable type tree (version >= 13)
+        int(1)           // type count
+        int(49)          // class id: TextAsset
+        metadata.write(0) // is stripped (version >= 16)
+        metadata.write(byteArrayOf(0xFF.toByte(), 0xFF.toByte())) // script type index (version >= 17)
+        metadata.write(ByteArray(16)) // old type hash (version >= 13)
+        int(1)           // type tree blob: node count (version >= 12)
+        int(8)           // string buffer size
+        metadata.write(ByteArray(24)) // one blob node (version < 19)
+        metadata.write(ByteArray(8))  // type tree strings
+        int(2)           // object count
+        align()          // object path ids are 4-byte aligned (version >= 14)
+        metadata.write(ByteArray(8) { index -> if (index == 0) 101 else 0 }) // path id 101
+        int(0); int(5); int(0) // offset, size, type id
+        align()
+        metadata.write(ByteArray(8) { index -> if (index == 0) 102 else 0 }) // path id 102
+        int(8); int(5); int(0)
+        val metadataBytes = metadata.toByteArray()
+        val headerSize = if (version >= 22) 48 else 20
+        val dataOffset = (headerSize + metadataBytes.size + 15) / 16 * 16
+        val data = ByteArray(16)
+        "hello".toByteArray(Charsets.UTF_8).copyInto(data, 0)
+        "world".toByteArray(Charsets.UTF_8).copyInto(data, 8)
+        val output = File(root, name)
+        FileOutputStream(output).use { stream ->
+            DataOutputStream(stream).use { out ->
+                out.writeInt(metadataBytes.size)             // metadata size (header is big-endian)
+                out.writeInt(dataOffset + data.size)         // file size
+                out.writeInt(version)
+                out.writeInt(dataOffset)
+                out.writeByte(0)                             // little-endian metadata
+                out.write(ByteArray(3))                      // reserved
+                if (version >= 22) {
+                    out.writeInt(metadataBytes.size)         // 32-bit metadata size repeat
+                    out.writeLong((dataOffset + data.size).toLong())
+                    out.writeLong(dataOffset.toLong())
+                    out.writeLong(0)                         // unknown
+                }
+                out.write(metadataBytes)
+                out.write(ByteArray(dataOffset - headerSize - metadataBytes.size))
+                out.write(data)
             }
         }
         return output

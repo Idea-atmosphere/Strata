@@ -36,4 +36,5 @@
         <item quantity="one">%1$d entry</item>
         <item quantity="other">%1$d entries</item>
     </plurals>
+    <string name="unity_repack_unsupported">This format is read-only. Repacking is supported for UnityFS bundles only.</string>
 </resources>

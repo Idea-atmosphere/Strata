@@ -128,6 +128,12 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
 
     fun repack(parents: List<ArchiveParent>) {
         val doc = document ?: return
+        if (!doc.repackSupported) {
+            _state.update {
+                it.copy(message = getApplication<Application>().getString(R.string.unity_repack_unsupported))
+            }
+            return
+        }
         val current = _state.value
         if (current.busy) return
         val changes = current.editedFiles + current.replacements

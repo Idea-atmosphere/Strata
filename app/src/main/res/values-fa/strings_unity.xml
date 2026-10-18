@@ -36,4 +36,5 @@
         <item quantity="one">%1$d ورودی</item>
         <item quantity="other">%1$d ورودی</item>
     </plurals>
+    <string name="unity_repack_unsupported">این قالب فقط‌خواندنی است؛ بازبسته‌بندی تنها برای بسته‌های UnityFS پشتیبانی می‌شود.</string>
 </resources>

@@ -38,4 +38,5 @@
         <item quantity="many">%1$d записей</item>
         <item quantity="other">%1$d записи</item>
     </plurals>
+    <string name="unity_repack_unsupported">Этот формат доступен только для чтения: пересборка поддерживается лишь для UnityFS.</string>
 </resources>

@@ -35,4 +35,5 @@
     <plurals name="unity_entries">
         <item quantity="other">%1$d 个条目</item>
     </plurals>
+    <string name="unity_repack_unsupported">此格式为只读；仅 UnityFS 包支持重新打包。</string>
 </resources>
