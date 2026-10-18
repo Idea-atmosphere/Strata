@@ -7,11 +7,14 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.cluvex.strata.R
 import dev.cluvex.strata.core.archive.ArchiveParent
+import dev.cluvex.strata.core.unity.TypeTreeCodec
 import dev.cluvex.strata.core.unity.UnityBundleDocument
 import dev.cluvex.strata.core.unity.UnityBundleEntry
 import dev.cluvex.strata.core.unity.UnityBundleReader
+import dev.cluvex.strata.core.unity.UnityFormatException
 import dev.cluvex.strata.core.unity.UnityPackageRepacker
 import dev.cluvex.strata.core.unity.UnityProbe
+import dev.cluvex.strata.core.unity.UnityTextInfo
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
@@ -34,17 +37,25 @@ data class UnityAssetUiState(
     val workingFiles: Map<String, File> = emptyMap(),
     val editedFiles: Map<String, File> = emptyMap(),
     val replacements: Map<String, File> = emptyMap(),
+    val textInfos: Map<String, UnityTextInfo> = emptyMap(),
+    val exportedTexts: Map<String, File> = emptyMap(),
+    val navigateTo: String? = null,
     val output: File? = null,
     val message: String? = null,
 )
 
 class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
+    private companion object {
+        const val MAX_TEXT_SCAN_OBJECTS = 5_000
+    }
+
     private val _state = MutableStateFlow(UnityAssetUiState())
     val state: StateFlow<UnityAssetUiState> = _state.asStateFlow()
 
     private var document: UnityBundleDocument? = null
     private var stageDir: File? = null
     private var workingBaselines: Map<String, Pair<Long, Long>> = emptyMap()
+    private var exportedBaselines: Map<String, Pair<Long, Long>> = emptyMap()
 
     fun open(path: String) {
         val current = _state.value
@@ -54,6 +65,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         stageDir?.deleteRecursively()
         document = null
         workingBaselines = emptyMap()
+        exportedBaselines = emptyMap()
         val newStageDir = File(getApplication<Application>().cacheDir, "unity-editor/${path.hashCode().toUInt().toString(16)}-${System.nanoTime()}")
         newStageDir.mkdirs()
         stageDir = newStageDir
@@ -68,7 +80,16 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                     probe to parsed
                 }
                 document = parsed
-                _state.update { it.copy(loading = false, probe = probe, document = parsed) }
+                val infos = withContext(Dispatchers.IO) {
+                    if (parsed?.supportsTextEditing == true && parsed.summary.entries.size <= MAX_TEXT_SCAN_OBJECTS) {
+                        parsed.summary.entries.mapNotNull { entry ->
+                            parsed.textInfo(entry)?.let { entry.name to it }
+                        }.toMap()
+                    } else {
+                        emptyMap()
+                    }
+                }
+                _state.update { it.copy(loading = false, probe = probe, document = parsed, textInfos = infos) }
             } catch (_: Exception) {
                 _state.update { it.copy(loading = false, error = getApplication<Application>().getString(R.string.unity_load_failed)) }
             }
@@ -117,6 +138,41 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Exports every string inside a serialized-file object as an editable JSON file. */
+    fun exportTexts(entry: UnityBundleEntry) {
+        val doc = document ?: return
+        val dir = stageDir ?: return
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true) }
+        viewModelScope.launch {
+            try {
+                val result = withContext(Dispatchers.IO) {
+                    val texts = doc.exportTexts(entry) ?: throw IOException("Entry has no editable text")
+                    val index = doc.summary.entries.indexOf(entry).coerceAtLeast(0)
+                    val safe = entry.displayName.replace(Regex("[^A-Za-z0-9._-]"), "_").take(48).ifEmpty { "object" }
+                    val file = File(dir, "texts-$index-$safe.json")
+                    file.writeText(TypeTreeCodec.writeJson(texts))
+                    Triple(file, texts.size, file.length() to file.lastModified())
+                }
+                exportedBaselines = exportedBaselines + (entry.name to result.third)
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        exportedTexts = it.exportedTexts + (entry.name to result.first),
+                        navigateTo = result.first.path,
+                        message = getApplication<Application>().getString(R.string.unity_texts_exported, result.second),
+                    )
+                }
+            } catch (_: Exception) {
+                _state.update { it.copy(busy = false, message = getApplication<Application>().getString(R.string.unity_operation_failed)) }
+            }
+        }
+    }
+
+    fun consumeNavigate() {
+        _state.update { it.copy(navigateTo = null) }
+    }
+
     fun refreshEditedFiles() {
         val current = _state.value
         val changed = current.workingFiles.filter { (name, file) ->
@@ -136,12 +192,11 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         }
         val current = _state.value
         if (current.busy) return
-        val changes = current.editedFiles + current.replacements
         _state.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
             try {
                 val output = withContext(Dispatchers.IO) {
-                    UnityPackageRepacker.repack(doc, changes, parents, getApplication<Application>().cacheDir)
+                    UnityPackageRepacker.repack(doc, collectChanges(doc, current), parents, getApplication<Application>().cacheDir)
                 }
                 _state.update {
                     it.copy(
@@ -150,12 +205,36 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                         busy = false,
                     )
                 }
-            } catch (_: Exception) {
-                _state.update {
-                    it.copy(message = getApplication<Application>().getString(R.string.unity_operation_failed), busy = false)
+            } catch (e: Exception) {
+                val message = if (e is UnityFormatException && e.message?.contains("JSON") == true) {
+                    getApplication<Application>().getString(R.string.unity_texts_bad_json, e.message ?: "")
+                } else {
+                    getApplication<Application>().getString(R.string.unity_operation_failed)
                 }
+                _state.update { it.copy(message = message, busy = false) }
             }
         }
+    }
+
+    /** Merges staged edits, picked replacements and any exported text JSON the user has modified. */
+    private fun collectChanges(doc: UnityBundleDocument, current: UnityAssetUiState): Map<String, File> {
+        val dir = stageDir
+        val textChanges = HashMap<String, File>()
+        if (dir != null) {
+            current.exportedTexts.forEach { (name, jsonFile) ->
+                if (!jsonFile.isFile) return@forEach
+                val baseline = exportedBaselines[name]
+                if (baseline != null && jsonFile.length() == baseline.first && jsonFile.lastModified() == baseline.second) return@forEach
+                val entry = doc.summary.entries.firstOrNull { it.name == name } ?: return@forEach
+                val edits = TypeTreeCodec.parseJson(jsonFile.readText())
+                val bytes = doc.rebuildTexts(entry, edits)
+                val staged = File(dir, "text-${name.hashCode().toUInt().toString(16)}-${System.nanoTime()}.bin")
+                staged.writeBytes(bytes)
+                textChanges[name] = staged
+                exportedBaselines = exportedBaselines + (name to (jsonFile.length() to jsonFile.lastModified()))
+            }
+        }
+        return current.editedFiles + textChanges + current.replacements
     }
 
     fun notifyMessage(text: String) {

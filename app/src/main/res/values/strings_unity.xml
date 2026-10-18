@@ -37,4 +37,8 @@
         <item quantity="other">%1$d entries</item>
     </plurals>
     <string name="unity_repack_unsupported">This format is read-only. Repacking is supported for UnityFS bundles only.</string>
+    <string name="unity_export_texts">Edit texts</string>
+    <string name="unity_texts_exported">Opened %1$d text entries as JSON — edit, save, then tap repack.</string>
+    <string name="unity_texts_badge">%1$d texts · %2$s</string>
+    <string name="unity_texts_bad_json">The edited JSON is invalid: %1$s</string>
 </resources>

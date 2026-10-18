@@ -56,6 +56,7 @@ import dev.cluvex.strata.core.unity.UnityBundleDocument
 import dev.cluvex.strata.core.unity.UnityBundleEntry
 import dev.cluvex.strata.core.unity.UnityFileKind
 import dev.cluvex.strata.core.unity.UnityProbe
+import dev.cluvex.strata.core.unity.UnityTextInfo
 import dev.cluvex.strata.core.util.Formatters
 import dev.cluvex.strata.ui.isolated
 import kotlinx.coroutines.Dispatchers
@@ -94,6 +95,12 @@ fun UnityAssetScreen(
         state.message?.let {
             snackbar.showSnackbar(it)
             vm.consumeMessage()
+        }
+    }
+    LaunchedEffect(state.navigateTo) {
+        state.navigateTo?.let { target ->
+            vm.consumeNavigate()
+            onOpenFile(FileItem.of(File(target)))
         }
     }
 
@@ -193,6 +200,7 @@ fun UnityAssetScreen(
                                     entry = entry,
                                     selected = state.selectedName == entry.name,
                                     modified = entry.name in state.replacements || entry.name in state.editedFiles,
+                                    textInfo = state.textInfos[entry.name],
                                     onClick = { vm.select(entry.name) },
                                 )
                             }
@@ -213,6 +221,11 @@ fun UnityAssetScreen(
                             },
                             onExport = { exportPicker.launch(entry.displayName) },
                             onReplace = { replacePicker.launch(arrayOf("*/*")) },
+                            onExportTexts = if (state.textInfos.containsKey(entry.name)) {
+                                { vm.exportTexts(entry) }
+                            } else {
+                                null
+                            },
                         )
                     } ?: Text(stringResource(R.string.unity_select_entry), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
 
@@ -286,6 +299,7 @@ private fun UnityEntryRow(
     entry: UnityBundleEntry,
     selected: Boolean,
     modified: Boolean,
+    textInfo: UnityTextInfo? = null,
     onClick: () -> Unit,
 ) {
     Surface(
@@ -297,7 +311,17 @@ private fun UnityEntryRow(
             Text(index.toString(), style = MaterialTheme.typography.labelMedium, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Column(Modifier.weight(1f)) {
                 Text(entry.displayName, style = MaterialTheme.typography.bodyMedium, maxLines = 1, overflow = TextOverflow.Ellipsis)
-                Text(isolated(entry.name), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                if (textInfo != null) {
+                    Text(
+                        stringResource(R.string.unity_texts_badge, textInfo.stringCount, textInfo.objectName ?: textInfo.className),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                } else {
+                    Text(isolated(entry.name), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
+                }
             }
             Column(horizontalAlignment = Alignment.End) {
                 Text(Formatters.size(entry.size), style = MaterialTheme.typography.labelMedium)
@@ -314,6 +338,7 @@ private fun UnityEntryActions(
     onOpen: () -> Unit,
     onExport: () -> Unit,
     onReplace: () -> Unit,
+    onExportTexts: (() -> Unit)? = null,
 ) {
     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Column(Modifier.padding(12.dp)) {
@@ -324,6 +349,11 @@ private fun UnityEntryActions(
                 TextButton(onClick = onOpen, enabled = !busy, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.unity_open_entry), maxLines = 1) }
                 TextButton(onClick = onExport, enabled = !busy, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.unity_export_entry), maxLines = 1) }
                 TextButton(onClick = onReplace, enabled = !busy, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.unity_replace_entry), maxLines = 1) }
+            }
+            if (onExportTexts != null) {
+                Button(onClick = onExportTexts, enabled = !busy, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
+                    Text(stringResource(R.string.unity_export_texts), maxLines = 1)
+                }
             }
         }
     }

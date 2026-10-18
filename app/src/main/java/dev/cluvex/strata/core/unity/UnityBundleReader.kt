@@ -57,6 +57,15 @@ data class UnityBundleSummary(
     val entries: List<UnityBundleEntry>,
 )
 
+/** Result of scanning one serialized-file object for editable game text. */
+data class UnityTextInfo(
+    val objectName: String?,
+    val className: String,
+    val stringCount: Int,
+    val textBytes: Long,
+    val sample: String,
+)
+
 class UnityFormatException(message: String, cause: Throwable? = null) : IOException(message, cause)
 
 /**
@@ -67,10 +76,40 @@ class UnityBundleDocument internal constructor(
     val source: File,
     val summary: UnityBundleSummary,
     internal val dataFile: File,
+    internal val serialized: SerializedFileIndex? = null,
 ) : Closeable {
 
-    /** Repacking is implemented for UnityFS only; legacy bundles and serialized files are read-only. */
-    val repackSupported: Boolean get() = summary.signature == "UnityFS"
+    /** Repacking is implemented for UnityFS bundles and serialized files; legacy containers are read-only. */
+    val repackSupported: Boolean get() = summary.signature == "UnityFS" || serialized != null
+
+    /** True when objects can be decoded through type trees and their texts edited. */
+    val supportsTextEditing: Boolean get() = serialized != null
+
+    /** Text statistics for one serialized-file object; null when it holds no decodable text. */
+    fun textInfo(entry: UnityBundleEntry): UnityTextInfo? {
+        val ser = serialized ?: return null
+        val slot = ser.slotFor(entry) ?: return null
+        if (!ser.hasTreeFor(entry)) return null
+        val value = ser.decode(dataFile, entry) ?: return null
+        val (count, bytes, sample) = TypeTreeCodec.textStats(value)
+        if (count == 0) return null
+        return UnityTextInfo(ser.objectName(value), SerializedFileReader.className(slot.classId), count, bytes, sample)
+    }
+
+    /** Flat "path -> value" map of every string inside the object, in decode order. */
+    fun exportTexts(entry: UnityBundleEntry): LinkedHashMap<String, String>? {
+        val ser = serialized ?: return null
+        val value = ser.decode(dataFile, entry) ?: return null
+        return TypeTreeCodec.exportStrings(value)
+    }
+
+    /** Re-encodes the object with the edited strings applied; returns the new raw object bytes. */
+    fun rebuildTexts(entry: UnityBundleEntry, edits: Map<String, String>): ByteArray {
+        val ser = serialized ?: throw UnityFormatException("This document does not support text editing")
+        val value = ser.decode(dataFile, entry) ?: throw UnityFormatException("Object cannot be decoded for editing")
+        TypeTreeCodec.applyStrings(value, edits)
+        return ser.encode(dataFile, entry, value)
+    }
 
     fun copyEntry(entry: UnityBundleEntry, output: File) {
         requireEntry(entry)
@@ -91,9 +130,14 @@ class UnityBundleDocument internal constructor(
 
     /** Writes a normalized UnityFS bundle. Inputs are never overwritten. */
     fun repack(output: File, replacements: Map<String, File> = emptyMap()) {
-        if (!repackSupported) throw UnityFormatException("This Unity format is read-only; repacking needs a UnityFS bundle")
+        if (!repackSupported) throw UnityFormatException("This Unity format is read-only; repacking needs a UnityFS bundle or serialized file")
         if (output.canonicalFile == source.canonicalFile) throw IOException("Output must not replace the source bundle")
         if (output.exists()) throw IOException("Output already exists: ${output.name}")
+        val serializedIndex = serialized
+        if (serializedIndex != null) {
+            serializedIndex.rebuild(output, dataFile, replacements, summary.entries)
+            return
+        }
         val unknown = replacements.keys - summary.entries.map { it.name }.toSet()
         if (unknown.isNotEmpty()) throw IOException("Replacement entry is not in this bundle: ${unknown.first()}")
 
@@ -339,13 +383,18 @@ object UnityBundleReader {
         cache.mkdirs()
         val dataFile = File(cache, "bundle-data.bin")
         try {
+            var serializedIndex: SerializedFileIndex? = null
             val summary = when (probe(file).kind) {
                 UnityFileKind.UNITY_FS -> parseUnityFs(file, dataFile)
                 UnityFileKind.UNITY_WEB, UnityFileKind.UNITY_RAW -> UnityLegacyReader.parse(file, dataFile)
-                UnityFileKind.SERIALIZED_FILE -> SerializedFileReader.parse(file, dataFile)
+                UnityFileKind.SERIALIZED_FILE -> {
+                    val (parsed, index) = SerializedFileReader.parse(file, dataFile)
+                    serializedIndex = index
+                    parsed
+                }
                 UnityFileKind.UNKNOWN -> throw UnityFormatException("Not a Unity file: ${file.name}")
             }
-            return UnityBundleDocument(file, summary, dataFile)
+            return UnityBundleDocument(file, summary, dataFile, serializedIndex)
         } catch (e: Throwable) {
             dataFile.delete()
             cache.delete()

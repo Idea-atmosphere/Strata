@@ -37,4 +37,8 @@
         <item quantity="other">%1$d ورودی</item>
     </plurals>
     <string name="unity_repack_unsupported">این قالب فقط‌خواندنی است؛ بازبسته‌بندی تنها برای بسته‌های UnityFS پشتیبانی می‌شود.</string>
+    <string name="unity_export_texts">ویرایش متن‌ها</string>
+    <string name="unity_texts_exported">‏%1$d رشتهٔ متنی به‌صورت JSON باز شد — ویرایش و ذخیره کنید، سپس بازبسته‌بندی را بزنید.</string>
+    <string name="unity_texts_badge">‏%1$d متن · %2$s</string>
+    <string name="unity_texts_bad_json">فایل JSON ویرایش‌شده معتبر نیست: %1$s</string>
 </resources>

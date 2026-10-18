@@ -39,4 +39,8 @@
         <item quantity="other">%1$d записи</item>
     </plurals>
     <string name="unity_repack_unsupported">Этот формат доступен только для чтения: пересборка поддерживается лишь для UnityFS.</string>
+    <string name="unity_export_texts">Правка текстов</string>
+    <string name="unity_texts_exported">Открыто строк: %1$d в JSON — отредактируйте, сохраните и нажмите пересборку.</string>
+    <string name="unity_texts_badge">Текстов: %1$d · %2$s</string>
+    <string name="unity_texts_bad_json">Изменённый JSON повреждён: %1$s</string>
 </resources>

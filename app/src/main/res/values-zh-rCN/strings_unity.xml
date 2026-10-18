@@ -36,4 +36,8 @@
         <item quantity="other">%1$d 个条目</item>
     </plurals>
     <string name="unity_repack_unsupported">此格式为只读；仅 UnityFS 包支持重新打包。</string>
+    <string name="unity_export_texts">编辑文本</string>
+    <string name="unity_texts_exported">已以 JSON 打开 %1$d 条文本 — 编辑保存后点击重新打包。</string>
+    <string name="unity_texts_badge">%1$d 条文本 · %2$s</string>
+    <string name="unity_texts_bad_json">编辑后的 JSON 无效：%1$s</string>
 </resources>

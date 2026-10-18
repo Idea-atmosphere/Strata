@@ -138,7 +138,7 @@ class UnityBundleReaderTest {
             document.copyEntry(document.summary.entries[1], second)
             assertThat(first.readText()).isEqualTo("hello")
             assertThat(second.readText()).isEqualTo("world")
-            assertThat(document.repackSupported).isFalse()
+            assertThat(document.repackSupported).isTrue()
         }
     }
 
@@ -211,6 +211,92 @@ class UnityBundleReaderTest {
             UnityBundleReader.open(source, File(temp.root, "cache"))
         }
         assertThat(error).hasMessageThat().contains("encrypted")
+    }
+
+    @Test
+    fun decodesTypedObjectsFromSerializedFile() {
+        val source = writeTypedSerialized(temp.root, "typed.assets", typedObjectOne(), typedObjectOne())
+        UnityBundleReader.open(source, File(temp.root, "cache")).use { document ->
+            assertThat(document.supportsTextEditing).isTrue()
+            val first = document.summary.entries[0]
+            val info = document.textInfo(first)
+            assertThat(info).isNotNull()
+            assertThat(info!!.stringCount).isEqualTo(6)
+            val texts = document.exportTexts(first)!!
+            assertThat(texts["m_Name"]).isEqualTo("obj1")
+            assertThat(texts["m_Items[0].Key"]).isEqualTo("k1")
+            assertThat(texts["m_Items[0].Value"]).isEqualTo("v1-long")
+            assertThat(texts["m_Items[1].Key"]).isEqualTo("key2")
+            assertThat(texts["m_Items[1].Value"]).isEqualTo("value2")
+            assertThat(texts["m_Script"]).isEqualTo("print('hi')")
+        }
+    }
+
+    @Test
+    fun rebuildsSerializedFileWithEditedTexts() {
+        val source = writeTypedSerialized(temp.root, "typed.assets", typedObjectOne(), typedObjectOne())
+        val output = File(temp.root, "typed-edited.assets")
+        UnityBundleReader.open(source, File(temp.root, "cache")).use { document ->
+            val first = document.summary.entries[0]
+            val edited = document.rebuildTexts(
+                first,
+                mapOf(
+                    "m_Items[0].Value" to "TRANSLATED",
+                    "m_Script" to "println()",
+                ),
+            )
+            val replacement = File(temp.root, "edited-object.bin").apply { writeBytes(edited) }
+            document.repack(output, mapOf(first.name to replacement))
+        }
+        UnityBundleReader.open(output, File(temp.root, "cache")).use { rebuilt ->
+            val first = rebuilt.summary.entries[0]
+            val texts = rebuilt.exportTexts(first)!!
+            assertThat(texts["m_Items[0].Value"]).isEqualTo("TRANSLATED")
+            assertThat(texts["m_Script"]).isEqualTo("println()")
+            assertThat(texts["m_Name"]).isEqualTo("obj1")
+            assertThat(texts["m_Items[1].Value"]).isEqualTo("value2")
+            assertThat(rebuilt.exportTexts(rebuilt.summary.entries[1])!!["m_Name"]).isEqualTo("obj1")
+        }
+    }
+
+    @Test
+    fun rebuildsSerializedFileWithRawReplacement() {
+        val source = writeTypedSerialized(temp.root, "typed.assets", typedObjectOne(), typedObjectOne())
+        val output = File(temp.root, "typed-raw.assets")
+        UnityBundleReader.open(source, File(temp.root, "cache")).use { document ->
+            val first = document.summary.entries[0]
+            val replacement = File(temp.root, "raw-object.bin").apply { writeBytes(typedObjectTwo()) }
+            document.repack(output, mapOf(first.name to replacement))
+        }
+        UnityBundleReader.open(output, File(temp.root, "cache")).use { rebuilt ->
+            val texts = rebuilt.exportTexts(rebuilt.summary.entries[0])!!
+            assertThat(texts["m_Name"]).isEqualTo("renamed")
+            assertThat(texts["m_Script"]).isEqualTo("edited-script")
+            assertThat(rebuilt.summary.entries[0].size).isEqualTo(typedObjectTwo().size.toLong())
+            assertThat(rebuilt.exportTexts(rebuilt.summary.entries[1])!!["m_Items[0].Key"]).isEqualTo("k1")
+        }
+    }
+
+    @Test
+    fun jsonRoundTripPreservesEscapesAndRejectsUnknownPaths() {
+        val map = linkedMapOf(
+            "a.b[0]" to "quote \" backslash \\ newline\nline2",
+            "uni" to "سلام دنیا \u00e9\u4e2d",
+            "empty" to "",
+        )
+        val parsed = TypeTreeCodec.parseJson(TypeTreeCodec.writeJson(map))
+        assertThat(parsed).isEqualTo(map)
+        val value = UVal.Struct(
+            linkedMapOf<String, UVal>(
+                "keep" to UVal.Str("old"),
+                "drop" to UVal.Str("other"),
+            ),
+        )
+        assertThat(TypeTreeCodec.applyStrings(value, mapOf("keep" to "new"))).isEqualTo(1)
+        assertThat((value.fields["keep"] as UVal.Str).value).isEqualTo("new")
+        assertThrows(UnityFormatException::class.java) {
+            TypeTreeCodec.applyStrings(value, mapOf("missing.path" to "x"))
+        }
     }
 
     private fun writeBundle(
@@ -468,5 +554,132 @@ class UnityBundleReaderTest {
         }
         out.write(payload)
         return out.toByteArray()
+    }
+    // ---------------------------------------------------------------------------------------
+    // Typed serialized-file fixtures. Object bytes are hand-built (independent of the codec)
+    // from this type tree:
+    //   Base(TestObj): m_Name string; m_Items vector<Item{Key string; Value string}>;
+    //                  m_Count int; m_Script string
+    // ---------------------------------------------------------------------------------------
+
+    private fun le32(value: Long): ByteArray = byteArrayOf(
+        value.toByte(),
+        (value ushr 8).toByte(),
+        (value ushr 16).toByte(),
+        (value ushr 24).toByte(),
+    )
+
+    private fun le64(value: Long): ByteArray = ByteArray(8) { index -> ((value ushr (8 * index)) and 0xFF).toByte() }
+
+    private fun common(id: Int): Int = (id.toLong() or 0x80000000L).toInt()
+
+    private fun leStr(out: ByteArrayOutputStream, value: String) {
+        val bytes = value.toByteArray(Charsets.UTF_8)
+        out.write(le32(bytes.size.toLong()))
+        out.write(bytes)
+        out.write(ByteArray((4 - bytes.size % 4) % 4))
+    }
+
+    private fun typedObjectOne(): ByteArray {
+        val out = ByteArrayOutputStream()
+        leStr(out, "obj1")            // m_Name
+        out.write(le32(2))            // m_Items count
+        leStr(out, "k1")              // item 0 key
+        leStr(out, "v1-long")         // item 0 value
+        leStr(out, "key2")            // item 1 key
+        leStr(out, "value2")          // item 1 value
+        out.write(le32(7))            // m_Count
+        leStr(out, "print('hi')")     // m_Script
+        return out.toByteArray()
+    }
+
+    private fun typedObjectTwo(): ByteArray {
+        val out = ByteArrayOutputStream()
+        leStr(out, "renamed")
+        out.write(le32(0))
+        out.write(le32(9))
+        leStr(out, "edited-script")
+        return out.toByteArray()
+    }
+
+    private fun typeTreeBlob(): Pair<ByteArray, ByteArray> {
+        val strings = "TestObj\u0000m_Items\u0000Item\u0000Key\u0000Value\u0000m_Count\u0000".replace("\\u0000", "\u0000").toByteArray(Charsets.UTF_8)
+        val testObj = 0
+        val mItems = 8
+        val item = 16
+        val key = 21
+        val value = 25
+        val mCount = 31
+        val nodes = ByteArrayOutputStream()
+        fun node(level: Int, type: Int, name: Int, metaFlag: Int) {
+            nodes.write(byteArrayOf(1, 0))          // node version u16
+            nodes.write(level)                      // level u8
+            nodes.write(0)                          // type flags u8
+            nodes.write(le32(type.toLong() and 0xFFFFFFFFL))
+            nodes.write(le32(name.toLong() and 0xFFFFFFFFL))
+            nodes.write(le32(-1L and 0xFFFFFFFFL))  // byte size (variable)
+            nodes.write(le32(0))                    // index
+            nodes.write(le32(metaFlag.toLong() and 0xFFFFFFFFL))
+        }
+        node(0, testObj, common(55), 0)             // Base
+        node(1, common(840), common(427), 0)        // m_Name: string
+        node(1, common(981), mItems, 0)             // m_Items: vector
+        node(2, common(49), common(49), 0x4000)     //   Array (align after)
+        node(3, common(222), common(795), 0)        //     size: int
+        node(3, item, common(106), 0)               //     data: Item
+        node(4, common(840), key, 0)                //       Key: string
+        node(4, common(840), value, 0)              //       Value: string
+        node(1, common(222), mCount, 0)             // m_Count: int
+        node(1, common(840), common(490), 0)        // m_Script: string
+        return nodes.toByteArray() to strings
+    }
+
+    private fun writeTypedSerialized(root: File, name: String, vararg objects: ByteArray): File {
+        val (nodes, strings) = typeTreeBlob()
+        val meta = ByteArrayOutputStream()
+        meta.write("2021.3.0f1".toByteArray(Charsets.UTF_8)); meta.write(0) // unity version
+        meta.write(le32(13))          // build target
+        meta.write(1)                 // enable type tree
+        meta.write(le32(1))           // type count
+        meta.write(le32(114))         // class id: MonoBehaviour
+        meta.write(0)                 // is stripped
+        meta.write(byteArrayOf(0xFF.toByte(), 0xFF.toByte())) // script type index -1
+        meta.write(ByteArray(16))     // script id (class 114)
+        meta.write(ByteArray(16))     // old type hash
+        meta.write(le32((nodes.size / 24).toLong()))
+        meta.write(le32(strings.size.toLong()))
+        meta.write(nodes)
+        meta.write(strings)
+        meta.write(le32(objects.size.toLong()))
+        var dataOffsetInSection = 0
+        val data = ByteArrayOutputStream()
+        objects.forEachIndexed { index, bytes ->
+            meta.write(ByteArray((4 - meta.size() % 4) % 4)) // align4 before path id
+            meta.write(le64((100 + index).toLong()))
+            meta.write(le32(dataOffsetInSection.toLong()))
+            meta.write(le32(bytes.size.toLong()))
+            meta.write(le32(0))       // type id 0
+            data.write(bytes)
+            dataOffsetInSection += bytes.size
+        }
+        val metadata = meta.toByteArray()
+        val dataBytes = data.toByteArray()
+        val headerSize = 20
+        val dataStart = (headerSize + metadata.size + 15) / 16 * 16
+        val output = File(root, name)
+        FileOutputStream(output).use { stream ->
+            DataOutputStream(stream).use { out ->
+                out.writeInt(metadata.size)
+                out.writeInt(dataStart + dataBytes.size)
+                out.writeInt(17)
+                out.writeInt(dataStart)
+                out.writeByte(0)
+                out.write(ByteArray(3))
+                out.write(metadata)
+                out.write(ByteArray(dataStart - headerSize - metadata.size))
+                out.write(dataBytes)
+            }
+        }
+        return output
     }
 }
