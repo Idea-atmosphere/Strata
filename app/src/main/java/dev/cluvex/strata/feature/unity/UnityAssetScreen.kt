@@ -72,6 +72,7 @@ fun UnityAssetScreen(
     refreshToken: Long,
     onBack: () -> Unit,
     onOpenFile: (FileItem) -> Unit,
+    onOpenNested: (File, List<ArchiveParent>) -> Unit,
     onSignApk: (File) -> Unit,
     onLocate: (folder: String, reveal: String?) -> Unit,
     vm: UnityAssetViewModel = viewModel(),
@@ -213,7 +214,11 @@ fun UnityAssetScreen(
                             onOpen = {
                                 scope.launch {
                                     try {
-                                        onOpenFile(FileItem.of(vm.fileFor(entry)))
+                                        val staged = vm.fileFor(entry)
+                                        onOpenNested(
+                                            staged,
+                                            parents + ArchiveParent(document.source.path, entry.name),
+                                        )
                                     } catch (_: Exception) {
                                         vm.notifyMessage(context.getString(R.string.unity_operation_failed))
                                     }

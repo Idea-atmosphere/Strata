@@ -597,6 +597,7 @@ private fun Screen(
             refreshToken = refreshToken,
             onBack = actions.pop,
             onOpenFile = actions.openFile,
+            onOpenNested = actions.openNestedFile,
             onSignApk = { file -> actions.signApk(FileItem.of(file)) },
             onLocate = actions.locate,
         )

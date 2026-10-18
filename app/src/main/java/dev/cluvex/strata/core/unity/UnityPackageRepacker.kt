@@ -37,12 +37,19 @@ object UnityPackageRepacker {
                 val destination = if (isFinal) uniqueSibling(source, "-unity-edited") else {
                     File(tempDir, "parent-${index}-${System.nanoTime()}-${source.name}")
                 }
-                copyExclusive(source, destination)
-                try {
-                    ZipEditor.replace(destination, parent.entryPath, current)
-                } catch (e: Throwable) {
-                    destination.delete()
-                    throw e
+                if (UnityBundleReader.probe(source).kind == UnityFileKind.UNITY_FS) {
+                    // The parent is itself a Unity bundle: rebuild it with the child entry replaced.
+                    UnityBundleReader.open(source, File(tempDir, "parent-cache-$index")).use { parentDoc ->
+                        parentDoc.repack(destination, mapOf(parent.entryPath to current))
+                    }
+                } else {
+                    copyExclusive(source, destination)
+                    try {
+                        ZipEditor.replace(destination, parent.entryPath, current)
+                    } catch (e: Throwable) {
+                        destination.delete()
+                        throw e
+                    }
                 }
                 if (current != bundle) current.delete()
                 current = destination
