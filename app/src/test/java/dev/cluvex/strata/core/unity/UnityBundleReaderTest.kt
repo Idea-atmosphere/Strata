@@ -152,6 +152,67 @@ class UnityBundleReaderTest {
         assertThat(error).hasMessageThat().contains("Unsupported serialized file version")
     }
 
+    @Test
+    fun readsVersion8BundleWithPaddingFlagAndLz4hcBlocks() {
+        val contents = ByteArray(70_000) { (it % 251).toByte() }
+        val source = writeAlignedBundle(temp.root, "v8.bundle", contents, formatVersion = 8, paddingFlag = true, lz4 = true)
+        val probe = UnityBundleReader.probe(source)
+        assertThat(probe.kind).isEqualTo(UnityFileKind.UNITY_FS)
+        assertThat(probe.fileVersion).isEqualTo(8)
+        UnityBundleReader.open(source, File(temp.root, "cache")).use { document ->
+            assertThat(document.summary.entries.map { it.name }).containsExactly("assets/data.bin")
+            val extracted = File(temp.root, "v8-out.bin")
+            document.copyEntry(document.summary.entries.single(), extracted)
+            assertThat(extracted.readBytes()).isEqualTo(contents)
+            assertThat(document.repackSupported).isTrue()
+        }
+    }
+
+    @Test
+    fun repacksVersion8BundleIntoAlignedLayout() {
+        val contents = ByteArray(40_000) { (it % 199).toByte() }
+        val source = writeAlignedBundle(temp.root, "v8.bundle", contents, formatVersion = 8, paddingFlag = true, lz4 = true)
+        val replacement = File(temp.root, "replacement.bin").apply { writeText("updated-v8") }
+        val output = File(temp.root, "rebuilt-v8.bundle")
+        UnityBundleReader.open(source, File(temp.root, "cache")).use { document ->
+            document.repack(output, mapOf("assets/data.bin" to replacement))
+        }
+        UnityBundleReader.open(output, File(temp.root, "cache")).use { rebuilt ->
+            assertThat(rebuilt.summary.formatVersion).isEqualTo(8)
+            val result = File(temp.root, "rebuilt-entry.bin")
+            rebuilt.copyEntry(rebuilt.summary.entries.single(), result)
+            assertThat(result.readText()).isEqualTo("updated-v8")
+        }
+    }
+
+    @Test
+    fun readsVersion7BundleWithoutPaddingFlag() {
+        val contents = "aligned but uncompressed".toByteArray()
+        val source = writeAlignedBundle(temp.root, "v7.bundle", contents, formatVersion = 7, paddingFlag = false, lz4 = false)
+        UnityBundleReader.open(source, File(temp.root, "cache")).use { document ->
+            val extracted = File(temp.root, "v7-out.bin")
+            document.copyEntry(document.summary.entries.single(), extracted)
+            assertThat(extracted.readBytes()).isEqualTo(contents)
+        }
+    }
+
+    @Test
+    fun rejectsLegacyEngineEncryptionFlag() {
+        val source = writeAlignedBundle(
+            temp.root,
+            "encrypted.bundle",
+            "payload".toByteArray(),
+            formatVersion = 6,
+            paddingFlag = true,
+            lz4 = false,
+            engineVersion = "2019.4.10f1",
+        )
+        val error = assertThrows(UnityFormatException::class.java) {
+            UnityBundleReader.open(source, File(temp.root, "cache"))
+        }
+        assertThat(error).hasMessageThat().contains("encrypted")
+    }
+
     private fun writeBundle(
         root: File,
         name: String,
@@ -330,5 +391,82 @@ class UnityBundleReaderTest {
             }
         }
         return output
+    }
+
+    /** Aligned UnityFS container (format version 6..8) mirroring what Unity 2019.4.15+ writes. */
+    private fun writeAlignedBundle(
+        root: File,
+        name: String,
+        contents: ByteArray,
+        formatVersion: Int,
+        paddingFlag: Boolean,
+        lz4: Boolean,
+        engineVersion: String = "2022.3.62f2",
+    ): File {
+        val blockFlags = if (lz4) 3 else 0
+        val blockPayload = if (lz4) lz4LiteralRun(contents) else contents
+        val info = ByteArrayOutputStream().use { bytes ->
+            DataOutputStream(bytes).use { out ->
+                out.write(MessageDigest.getInstance("MD5").digest(contents))
+                out.writeInt(1)
+                out.writeInt(contents.size)
+                out.writeInt(blockPayload.size)
+                out.writeShort(blockFlags)
+                out.writeInt(1)
+                out.writeLong(0)
+                out.writeLong(contents.size.toLong())
+                out.writeInt(4)
+                out.write("assets/data.bin".toByteArray(Charsets.UTF_8))
+                out.writeByte(0)
+            }
+            bytes.toByteArray()
+        }
+        val infoPayload = if (lz4) lz4LiteralRun(info) else info
+        val infoFlags = 0x40 or (if (paddingFlag) 0x200 else 0) or blockFlags
+        val headerPrefix = ByteArrayOutputStream().use { bytes ->
+            DataOutputStream(bytes).use { out ->
+                out.write("UnityFS".toByteArray(Charsets.UTF_8))
+                out.writeByte(0)
+                out.writeInt(formatVersion)
+                out.write("5.x.x".toByteArray(Charsets.UTF_8))
+                out.writeByte(0)
+                out.write(engineVersion.toByteArray(Charsets.UTF_8))
+                out.writeByte(0)
+            }
+            bytes.toByteArray()
+        }
+        val headerSize = headerPrefix.size + 8 + 4 + 4 + 4
+        val padding = if (formatVersion >= 7) (16 - headerSize % 16) % 16 else 0
+        val dataPadding = if (paddingFlag) (16 - (headerSize + padding + infoPayload.size) % 16) % 16 else 0
+        val total = headerSize + padding + infoPayload.size + dataPadding + blockPayload.size
+        val output = File(root, name)
+        FileOutputStream(output).use { stream ->
+            DataOutputStream(stream).use { out ->
+                out.write(headerPrefix)
+                out.writeLong(total.toLong())
+                out.writeInt(infoPayload.size)
+                out.writeInt(info.size)
+                out.writeInt(infoFlags)
+                out.write(ByteArray(padding))
+                out.write(infoPayload)
+                out.write(ByteArray(dataPadding))
+                out.write(blockPayload)
+            }
+        }
+        return output
+    }
+
+    /** Valid LZ4 block made of a single literal run (no matches), like an incompressible payload. */
+    private fun lz4LiteralRun(payload: ByteArray): ByteArray {
+        val out = ByteArrayOutputStream()
+        val run = payload.size
+        out.write(if (run >= 15) 0xF0 else run shl 4)
+        var remaining = run - 15
+        while (remaining >= 0) {
+            out.write(minOf(remaining, 255))
+            remaining -= 255
+        }
+        out.write(payload)
+        return out.toByteArray()
     }
 }

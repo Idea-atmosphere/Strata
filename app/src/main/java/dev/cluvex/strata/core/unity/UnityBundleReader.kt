@@ -211,7 +211,15 @@ class UnityBundleDocument internal constructor(
                 bytes.toByteArray()
             }
             val headerSize = headerPrefix.size + 8 + 4 + 4 + 4
-            val totalSize = checkedAdd(checkedAdd(headerSize.toLong(), blockInfo.size.toLong(), "UnityFS is too large"), dataSize, "UnityFS is too large")
+            // UnityFS format version 7 and later align the block table to a 16-byte boundary,
+            // matching the quirk that some 2019.4.15+ games align version 6 bundles as well.
+            val alignmentPadding =
+                if (original.formatVersion >= 7 || UnityBundleReader.usesLegacyBlockAlignment(original.engineVersion)) {
+                    (16 - headerSize % 16) % 16
+                } else {
+                    0
+                }
+            val totalSize = checkedAdd(checkedAdd((headerSize + alignmentPadding).toLong(), blockInfo.size.toLong(), "UnityFS is too large"), dataSize, "UnityFS is too large")
             try {
                 FileOutputStream(output).buffered(BUFFER_SIZE).use { fileOut ->
                     DataOutputStream(fileOut).use { out ->
@@ -220,6 +228,7 @@ class UnityBundleDocument internal constructor(
                         out.writeInt(blockInfo.size)
                         out.writeInt(blockInfo.size)
                         out.writeInt(BLOCK_INFO_AT_START)
+                        if (alignmentPadding > 0) out.write(ByteArray(alignmentPadding))
                         out.write(blockInfo)
                         FileInputStream(data).buffered().use { it.copyTo(out, BUFFER_SIZE) }
                     }
@@ -355,7 +364,7 @@ object UnityBundleReader {
                 throw UnityFormatException("Unsupported Unity format${detail}")
             }
             val versionLong = readU32(input)
-            if (versionLong !in 6L..7L) throw UnityFormatException("Unsupported UnityFS format version $versionLong")
+            if (versionLong !in 6L..8L) throw UnityFormatException("Unsupported UnityFS format version $versionLong")
             val formatVersion = versionLong.toInt()
             val playerVersion = readCString(input, 4096)
             val engineVersion = readCString(input, 4096)
@@ -364,14 +373,22 @@ object UnityBundleReader {
             val uncompressedInfoSize = readU32(input)
             val flags = readU32(input)
             val headerEnd = input.filePointer
-            if (bundleSize < headerEnd || bundleSize > file.length() || bundleSize <= 0) throw UnityFormatException("UnityFS bundle size is invalid")
+            if (flags and FLAG_BLOCK_INFO_NEEDS_PADDING != 0L && usesOldArchiveFlags(engineVersion)) {
+                // Engines before the alignment fix used 0x200 for UnityCN encryption instead of padding.
+                throw UnityFormatException("UnityCN-encrypted bundles are not supported")
+            }
+            // UnityFS format version 7 and later align the stream to 16 bytes right after the header.
+            // Quirk: some 2019.4.15+ games write format version 6 with the aligned layout as well.
+            val aligned = formatVersion >= 7 || usesLegacyBlockAlignment(engineVersion)
+            val alignedHeaderEnd = if (aligned) align16(headerEnd.toLong()) else headerEnd.toLong()
+            if (bundleSize < alignedHeaderEnd || bundleSize > file.length() || bundleSize <= 0) throw UnityFormatException("UnityFS bundle size is invalid")
             if (compressedInfoSize > MAX_INFO_BYTES || uncompressedInfoSize > MAX_INFO_BYTES || compressedInfoSize > Int.MAX_VALUE || uncompressedInfoSize > Int.MAX_VALUE) {
                 throw UnityFormatException("UnityFS block table is too large")
             }
             if (compressedInfoSize > bundleSize) throw UnityFormatException("UnityFS block table is outside the file")
             val infoAtEnd = flags and FLAG_BLOCK_INFO_AT_END != 0L
-            val infoOffset = if (infoAtEnd) bundleSize - compressedInfoSize else headerEnd
-            if (infoOffset < headerEnd || infoOffset + compressedInfoSize > bundleSize) throw UnityFormatException("UnityFS block table offset is invalid")
+            val infoOffset = if (infoAtEnd) bundleSize - compressedInfoSize else alignedHeaderEnd
+            if (infoOffset < alignedHeaderEnd || infoOffset + compressedInfoSize > bundleSize) throw UnityFormatException("UnityFS block table offset is invalid")
             input.seek(infoOffset)
             val compressedInfo = ByteArray(compressedInfoSize.toInt())
             input.readFully(compressedInfo)
@@ -410,7 +427,7 @@ object UnityBundleReader {
                 nodes += UnityBundleEntry(path, offset, size, nodeFlags)
             }
             if (table.remaining > 16) throw UnityFormatException("UnityFS block table contains unexpected trailing data")
-            val dataOffset = if (infoAtEnd) headerEnd else {
+            val dataOffset = if (infoAtEnd) alignedHeaderEnd else {
                 val afterInfo = infoOffset + compressedInfoSize
                 if (flags and FLAG_BLOCK_INFO_NEEDS_PADDING != 0L) align16(afterInfo) else afterInfo
             }
@@ -574,6 +591,35 @@ object UnityBundleReader {
     }.getOrElse { UnityProbe(UnityFileKind.UNKNOWN, signature, note = "Unknown Unity file signature") }
 
     private fun align16(value: Long): Long = (value + 15L) and -16L
+
+    /**
+     * Engines older than 2020.3.34 / 2021.3.2 / 2022.1.1 used archive flag 0x200 for UnityCN
+     * encryption; newer engines reuse the same bit for block-info start padding.
+     */
+    private fun usesOldArchiveFlags(engineVersion: String): Boolean {
+        val parts = parseEngineVersion(engineVersion) ?: return false
+        val (major, minor, patch) = parts
+        return when {
+            major < 2020 -> true
+            major == 2020 -> minor < 3 || (minor == 3 && patch < 34)
+            major == 2021 -> minor < 3 || (minor == 3 && patch < 2)
+            major == 2022 -> minor < 1
+            else -> false
+        }
+    }
+
+    /** Quirk: some 2019.4.15+ games write format version 6 bundles with the aligned (version 7) layout. */
+    internal fun usesLegacyBlockAlignment(engineVersion: String): Boolean {
+        val parts = parseEngineVersion(engineVersion) ?: return false
+        val (major, minor, patch) = parts
+        return major == 2019 && (minor > 4 || (minor == 4 && patch >= 15))
+    }
+
+    private fun parseEngineVersion(engineVersion: String): Triple<Int, Int, Int>? {
+        val parts = Regex("\\d+").findAll(engineVersion).mapNotNull { it.value.toIntOrNull() }.toList()
+        if (parts.isEmpty()) return null
+        return Triple(parts[0], parts.getOrElse(1) { 0 }, parts.getOrElse(2) { 0 })
+    }
 
     internal fun readCString(input: RandomAccessFile, max: Int): String {
         val bytes = ByteArrayOutputStream()
