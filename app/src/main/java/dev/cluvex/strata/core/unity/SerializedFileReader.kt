@@ -4,6 +4,8 @@ import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
 import java.io.RandomAccessFile
+import java.nio.ByteBuffer
+import java.nio.charset.CodingErrorAction
 
 /**
  * Reader for Unity serialized asset files ("*.assets", "CAB-*", "level*", ".sharedAssets", ...).
@@ -24,13 +26,56 @@ internal object SerializedFileReader {
     private const val MAX_DECODE_BYTES = 256 * 1024 * 1024
     private const val BUFFER_SIZE = 64 * 1024
 
-    fun parse(file: File, dataFile: File): Pair<UnityBundleSummary, SerializedFileIndex> {
+    fun parse(file: File, dataFile: File): Pair<UnityBundleSummary, SerializedFileIndex> =
+        parseInternal(file, 0L, file.length(), dataFile, stageObjectData = true)
+
+    /** Parses a serialized file stored inside an already-staged UnityFS data section. */
+    fun parseEmbedded(file: File, fileOffset: Long, fileLength: Long): Pair<UnityBundleSummary, SerializedFileIndex> =
+        parseInternal(file, fileOffset, fileLength, file, stageObjectData = false)
+
+    /** Cheap header check that separates arbitrary entry bytes from an unsupported file version. */
+    fun looksLikeSerializedHeader(file: File, fileOffset: Long, fileLength: Long): Boolean = runCatching {
+        if (fileOffset < 0 || fileLength < 20 || fileOffset > file.length() || fileLength > file.length() - fileOffset) {
+            return@runCatching false
+        }
         RandomAccessFile(file, "r").use { input ->
+            input.seek(fileOffset)
+            var metadataSize = UnityBundleReader.readU32(input)
+            var declaredSize = UnityBundleReader.readU32(input)
+            val version = UnityBundleReader.readU32(input)
+            var dataOffset = UnityBundleReader.readU32(input)
+            val endian = input.readUnsignedByte()
+            input.skipBytes(3)
+            var headerSize = 20L
+            if (version >= 22 && fileLength >= 48) {
+                metadataSize = UnityBundleReader.readU32(input)
+                declaredSize = input.readLong()
+                dataOffset = input.readLong()
+                input.readLong()
+                headerSize = 48L
+            }
+            metadataSize > 0 && declaredSize in headerSize..fileLength &&
+                dataOffset in headerSize..declaredSize && metadataSize <= dataOffset - headerSize && endian in 0..1
+        }
+    }.getOrDefault(false)
+
+    private fun parseInternal(
+        file: File,
+        sourceOffset: Long,
+        regionLength: Long,
+        dataFile: File,
+        stageObjectData: Boolean,
+    ): Pair<UnityBundleSummary, SerializedFileIndex> {
+        RandomAccessFile(file, "r").use { input ->
+            if (sourceOffset < 0 || regionLength < 0 || sourceOffset > input.length() || regionLength > input.length() - sourceOffset) {
+                throw UnityFormatException("Serialized file range is outside its container")
+            }
+            input.seek(sourceOffset)
             UnityBundleReader.readU32(input) // metadata size (32 bit, unused for v9+)
             val fileSize32 = UnityBundleReader.readU32(input)
             val version = UnityBundleReader.readU32(input)
             val dataOffset32 = UnityBundleReader.readU32(input)
-            if (version !in 9..22) throw UnityFormatException("Unsupported serialized file version $version")
+            if (version !in 9..22) throw UnityUnsupportedVersionException("Unsupported serialized file version $version")
             val bigEndian = input.readUnsignedByte() == 1
             input.skipBytes(3)
             var fileSize = fileSize32
@@ -41,13 +86,13 @@ internal object SerializedFileReader {
                 dataOffset = input.readLong()
                 input.readLong() // unknown
             }
-            val headerSize = input.filePointer
-            if (fileSize < headerSize || fileSize > file.length()) throw UnityFormatException("Serialized file size is invalid")
+            val headerSize = input.filePointer - sourceOffset
+            if (fileSize < headerSize || fileSize > regionLength) throw UnityFormatException("Serialized file size is invalid")
             if (dataOffset < headerSize || dataOffset > fileSize) throw UnityFormatException("Serialized data offset is invalid")
             val metadataSize = dataOffset - headerSize
             if (metadataSize > MAX_STRING_BYTES * 64L) throw UnityFormatException("Serialized metadata is too large")
             val metadata = ByteArray(metadataSize.toInt())
-            input.seek(headerSize)
+            input.seek(sourceOffset + headerSize)
             input.readFully(metadata)
             val table = UnityBundleReader.Cursor(metadata, bigEndian)
             fun pos(): Int = metadata.size - table.remaining
@@ -114,19 +159,27 @@ internal object SerializedFileReader {
                 slots += SerializedFileIndex.Slot(pathId, typeId, classId, start, size, startFieldPos, startIsI64, sizeFieldPos, name)
             }
 
-            val availableSpace = dataFile.parentFile?.usableSpace ?: Long.MAX_VALUE
-            if (dataSize > availableSpace) throw UnityFormatException("Not enough free space to stage Unity data")
-            dataFile.parentFile?.mkdirs()
-            input.seek(dataOffset)
-            FileOutputStream(dataFile).buffered(BUFFER_SIZE).use { out -> copyExactly(input, out, dataSize) }
+            val dataBaseOffset = if (stageObjectData) {
+                val availableSpace = dataFile.parentFile?.usableSpace ?: Long.MAX_VALUE
+                if (dataSize > availableSpace) throw UnityFormatException("Not enough free space to stage Unity data")
+                dataFile.parentFile?.mkdirs()
+                input.seek(sourceOffset + dataOffset)
+                FileOutputStream(dataFile).buffered(BUFFER_SIZE).use { out -> copyExactly(input, out, dataSize) }
+                0L
+            } else {
+                sourceOffset + dataOffset
+            }
             val summary = UnityBundleSummary(
                 "SerializedFile", version.toInt(), "", unityVersion,
                 fileSize, dataSize, 0, entries,
             )
             val index = SerializedFileIndex(
                 source = file,
+                sourceOffset = sourceOffset,
+                dataBaseOffset = dataBaseOffset,
                 version = version,
                 bigEndian = bigEndian,
+                enableTypeTree = enableTypeTree,
                 headerSize = headerSize.toInt(),
                 dataOffset = dataOffset,
                 metadataBytes = metadata,
@@ -196,15 +249,36 @@ internal object SerializedFileReader {
     )
 }
 
+internal enum class SerializedDecodeIssue {
+    ENTRY_NOT_FOUND,
+    NO_TYPE_TREE,
+    UNSUPPORTED_CLASS,
+    OBJECT_TOO_LARGE,
+    MALFORMED_OBJECT,
+}
+
+internal sealed class SerializedDecodeResult {
+    data class Success(val value: UVal) : SerializedDecodeResult()
+    data class Failure(
+        val issue: SerializedDecodeIssue,
+        val detail: String,
+        val cause: Throwable? = null,
+    ) : SerializedDecodeResult()
+}
+
 /**
  * Everything needed to decode, re-encode and rebuild a parsed serialized file. Object table
- * field positions are recorded during parsing so a rebuild only patches offsets/sizes in place:
- * the metadata length (and therefore the data offset) never changes.
+ * field positions are recorded during parsing so a rebuild only patches offsets/sizes in place.
+ * Rebuilds may resize existing objects, but cannot grow metadata or add/remove object-table rows;
+ * callers that need a different object count must use a full serialized-file authoring pipeline.
  */
 internal class SerializedFileIndex(
     val source: File,
+    val sourceOffset: Long,
+    val dataBaseOffset: Long,
     val version: Long,
     val bigEndian: Boolean,
+    val enableTypeTree: Boolean,
     val headerSize: Int,
     val dataOffset: Long,
     val metadataBytes: ByteArray,
@@ -227,61 +301,127 @@ internal class SerializedFileIndex(
 
     fun slotFor(entry: UnityBundleEntry): Slot? = slotsByName[entry.name]
 
-    fun hasTreeFor(entry: UnityBundleEntry): Boolean {
-        val slot = slotFor(entry) ?: return false
-        return trees.getOrNull(slot.typeIndex) != null || slot.classId == 49
-    }
-
     fun readObjectBytes(dataFile: File, slot: Slot): ByteArray {
         if (slot.size > MAX_DECODE_BYTES) throw UnityFormatException("Serialized object is too large to decode")
         val bytes = ByteArray(slot.size.toInt())
         RandomAccessFile(dataFile, "r").use { input ->
-            input.seek(slot.start)
+            input.seek(dataBaseOffset + slot.start)
             input.readFully(bytes)
         }
         return bytes
     }
 
-    /** Decodes an object into an editable value tree; null when it cannot be decoded safely. */
-    fun decode(dataFile: File, entry: UnityBundleEntry): UVal? {
-        val slot = slotFor(entry) ?: return null
-        return try {
-            val bytes = readObjectBytes(dataFile, slot)
-            val tree = trees.getOrNull(slot.typeIndex)
-            if (tree != null) {
-                val (value, consumed) = TypeTreeCodec.decodeChecked(tree, bytes, bigEndian)
-                if (consumed != bytes.size) null else value
-            } else if (slot.classId == 49) {
-                TypeTreeCodec.decodeTextAsset(bytes, bigEndian)?.let { (name, script) ->
-                    UVal.Struct(
-                        linkedMapOf<String, UVal>(
-                            "m_Name" to UVal.Str(name),
-                            "m_Script" to UVal.Bytes(script),
-                        ),
-                    )
-                }
-            } else {
-                null
-            }
+    /** Typed decode result; failures keep the concrete reason instead of disappearing as null. */
+    fun decodeResult(dataFile: File, entry: UnityBundleEntry): SerializedDecodeResult {
+        val slot = slotFor(entry) ?: return SerializedDecodeResult.Failure(
+            SerializedDecodeIssue.ENTRY_NOT_FOUND,
+            "Entry does not belong to this serialized file",
+        )
+        val bytes = try {
+            readObjectBytes(dataFile, slot)
+        } catch (e: UnityFormatException) {
+            return SerializedDecodeResult.Failure(SerializedDecodeIssue.OBJECT_TOO_LARGE, e.message ?: "Object is too large", e)
         } catch (e: Exception) {
-            null
+            return SerializedDecodeResult.Failure(SerializedDecodeIssue.MALFORMED_OBJECT, e.message ?: "Object could not be read", e)
         }
+        return decodeBytes(slot, bytes)
     }
 
-    /** Re-encodes a (possibly edited) value tree back into raw object bytes. */
+    private fun decodeBytes(slot: Slot, bytes: ByteArray): SerializedDecodeResult {
+        val tree = trees.getOrNull(slot.typeIndex)
+        if (tree != null) {
+            return try {
+                val (value, consumed) = TypeTreeCodec.decodeChecked(tree, bytes, bigEndian)
+                if (consumed != bytes.size) {
+                    SerializedDecodeResult.Failure(
+                        SerializedDecodeIssue.MALFORMED_OBJECT,
+                        "Decoded ${consumed} of ${bytes.size} object bytes",
+                    )
+                } else {
+                    SerializedDecodeResult.Success(value)
+                }
+            } catch (e: Exception) {
+                SerializedDecodeResult.Failure(
+                    SerializedDecodeIssue.MALFORMED_OBJECT,
+                    e.message ?: "Object does not match its type tree",
+                    e,
+                )
+            }
+        }
+        if (slot.classId == TEXT_ASSET_CLASS_ID) {
+            val decoded = try {
+                TypeTreeCodec.decodeTextAsset(bytes, bigEndian)
+            } catch (e: Exception) {
+                return SerializedDecodeResult.Failure(
+                    SerializedDecodeIssue.MALFORMED_OBJECT,
+                    "TextAsset does not match the built-in fallback layout",
+                    e,
+                )
+            }
+            val (name, script) = decoded
+            val scriptText = decodeUtf8(script)
+            val scriptValue: UVal = if (scriptText != null) UVal.Str(scriptText) else UVal.Bytes(script)
+            return SerializedDecodeResult.Success(
+                UVal.Struct(
+                    linkedMapOf(
+                        "m_Name" to UVal.Str(name),
+                        "m_Script" to scriptValue,
+                    ),
+                ),
+            )
+        }
+        val className = SerializedFileReader.className(slot.classId)
+        val detail = when (slot.classId) {
+            MONO_BEHAVIOUR_CLASS_ID -> "MonoBehaviour custom fields require a type tree or managed script schema"
+            FONT_CLASS_ID -> "Font layout requires a type tree for this Unity version"
+            else -> "$className has no type tree and no safe built-in fallback"
+        }
+        return SerializedDecodeResult.Failure(
+            if (enableTypeTree) SerializedDecodeIssue.UNSUPPORTED_CLASS else SerializedDecodeIssue.NO_TYPE_TREE,
+            detail,
+        )
+    }
+
+    /** Re-encodes a value and immediately decodes it again with the same schema. */
     fun encode(dataFile: File, entry: UnityBundleEntry, value: UVal): ByteArray {
         val slot = slotFor(entry) ?: throw UnityFormatException("Entry does not belong to this serialized file")
         val tree = trees.getOrNull(slot.typeIndex)
-        return if (tree != null) {
+        val encoded = if (tree != null) {
             TypeTreeCodec.encode(tree, value, bigEndian)
-        } else if (slot.classId == 49 && value is UVal.Struct) {
+        } else if (slot.classId == TEXT_ASSET_CLASS_ID && value is UVal.Struct) {
             val name = (value.fields["m_Name"] as? UVal.Str)?.value
-            val script = (value.fields["m_Script"] as? UVal.Bytes)?.data
-            if (name == null || script == null) throw UnityFormatException("TextAsset value is incomplete")
+                ?: throw UnityFormatException("TextAsset value is missing m_Name")
+            val script = when (val scriptValue = value.fields["m_Script"]) {
+                is UVal.Str -> scriptValue.value.toByteArray(Charsets.UTF_8)
+                is UVal.Bytes -> scriptValue.data
+                else -> throw UnityFormatException("TextAsset value is missing m_Script")
+            }
             TypeTreeCodec.encodeTextAsset(name, script, bigEndian)
         } else {
-            throw UnityFormatException("This object has no type tree and cannot be re-encoded")
+            throw UnityFormatException("${SerializedFileReader.className(slot.classId)} has no type information and cannot be re-encoded safely")
         }
+        when (val verified = decodeBytes(slot, encoded)) {
+            is SerializedDecodeResult.Failure -> throw UnityFormatException(
+                "Re-encoded object failed its self-check: ${verified.detail}",
+                verified.cause,
+            )
+            is SerializedDecodeResult.Success -> {
+                if (TypeTreeCodec.exportStrings(verified.value) != TypeTreeCodec.exportStrings(value)) {
+                    throw UnityFormatException("Re-encoded object failed its text round-trip self-check")
+                }
+            }
+        }
+        return encoded
+    }
+
+    private fun decodeUtf8(bytes: ByteArray): String? = try {
+        Charsets.UTF_8.newDecoder()
+            .onMalformedInput(CodingErrorAction.REPORT)
+            .onUnmappableCharacter(CodingErrorAction.REPORT)
+            .decode(ByteBuffer.wrap(bytes))
+            .toString()
+    } catch (_: Exception) {
+        null
     }
 
     fun objectName(value: UVal): String? =
@@ -324,7 +464,10 @@ internal class SerializedFileIndex(
         if (!output.createNewFile()) throw IOException("Output already exists: ${output.name}")
         try {
             val header = ByteArray(headerSize)
-            RandomAccessFile(source, "r").use { it.readFully(header) }
+            RandomAccessFile(source, "r").use {
+                it.seek(sourceOffset)
+                it.readFully(header)
+            }
             if (version >= 22) {
                 writeField(header, 24, newFileSize, 8, bigEndian = true)
             } else {
@@ -350,7 +493,7 @@ internal class SerializedFileIndex(
                                 }
                             }
                         } else {
-                            staged.seek(slot.start)
+                            staged.seek(dataBaseOffset + slot.start)
                             var left = slot.size
                             while (left > 0) {
                                 val read = staged.read(buffer, 0, minOf(left, buffer.size.toLong()).toInt())
@@ -395,5 +538,8 @@ internal class SerializedFileIndex(
 
     companion object {
         private const val MAX_DECODE_BYTES = 256 * 1024 * 1024
+        private const val TEXT_ASSET_CLASS_ID = 49
+        private const val MONO_BEHAVIOUR_CLASS_ID = 114
+        private const val FONT_CLASS_ID = 128
     }
 }

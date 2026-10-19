@@ -29,7 +29,7 @@ internal object UnityLegacyReader {
                 throw UnityFormatException("Unsupported legacy Unity container")
             }
             val version = UnityBundleReader.readU32(input)
-            if (version !in 1..9) throw UnityFormatException("Unsupported legacy Unity bundle version $version")
+            if (version !in 1..9) throw UnityUnsupportedVersionException("Unsupported legacy Unity bundle version $version")
             val playerVersion = UnityBundleReader.readCString(input, 4096)
             val engineVersion = UnityBundleReader.readCString(input, 4096)
             if (version >= 4) {

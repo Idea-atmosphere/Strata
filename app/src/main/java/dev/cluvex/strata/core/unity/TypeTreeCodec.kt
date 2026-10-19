@@ -579,14 +579,17 @@ internal object TypeTreeCodec {
     }
 
     /** TextAsset fallback decoding (used when no type tree is available). */
-    fun decodeTextAsset(data: ByteArray, bigEndian: Boolean): Pair<String, ByteArray>? {
-        return try {
+    fun decodeTextAsset(data: ByteArray, bigEndian: Boolean): Pair<String, ByteArray> {
+        try {
             val reader = TTReader(data, bigEndian)
             val name = reader.readAlignedString()
             val script = reader.readByteArray()
-            name to script
+            if (reader.pos != data.size) throw UnityFormatException("TextAsset has unexpected trailing bytes")
+            return name to script
+        } catch (e: UnityFormatException) {
+            throw e
         } catch (e: Exception) {
-            null
+            throw UnityFormatException("TextAsset fallback decode failed", e)
         }
     }
 
