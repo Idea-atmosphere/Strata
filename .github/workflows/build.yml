@@ -50,6 +50,9 @@ jobs:
       - name: Build the native core
         run: native/build.sh
 
+      - name: Run JVM unit tests
+        run: ./gradlew --stacktrace :app:testDebugUnitTest
+
       - name: Build the debug APK
         if: ${{ !startsWith(github.ref, 'refs/tags/') }}
         run: ./gradlew --stacktrace :app:assembleDebug
