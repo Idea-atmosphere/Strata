@@ -231,6 +231,11 @@ class UnityBundleReaderTest {
         assertThat(repeatedEncoded.size).isLessThan(repeated.size / 10)
         assertThat(decodeLz4Fixture(repeatedEncoded, repeated.size)).isEqualTo(repeated)
 
+        listOf(65_535, 65_536, 65_537).forEach { size ->
+            val exactBoundary = ByteArray(size) { (it % 193).toByte() }
+            assertThat(decodeLz4Fixture(Lz4BlockEncoder.encode(exactBoundary), size)).isEqualTo(exactBoundary)
+        }
+
         var randomState = 0x2468ACE1
         val random = ByteArray(128 * 1024) {
             randomState = randomState xor (randomState shl 13)
