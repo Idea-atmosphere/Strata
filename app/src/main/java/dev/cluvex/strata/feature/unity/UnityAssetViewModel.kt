@@ -11,17 +11,23 @@ import dev.cluvex.strata.core.unity.TypeTreeCodec
 import dev.cluvex.strata.core.unity.UnityBundleDocument
 import dev.cluvex.strata.core.unity.UnityBundleEntry
 import dev.cluvex.strata.core.unity.UnityBundleReader
+import dev.cluvex.strata.core.unity.UnityDocumentClosedException
 import dev.cluvex.strata.core.unity.UnityFormatException
+import dev.cluvex.strata.core.unity.UnityOperationCancelledException
 import dev.cluvex.strata.core.unity.UnityPackageRepacker
 import dev.cluvex.strata.core.unity.UnityProbe
 import dev.cluvex.strata.core.unity.UnityTextInfo
+import dev.cluvex.strata.core.unity.UnityTextInspection
+import dev.cluvex.strata.core.unity.UnityTextUnavailableReason
+import dev.cluvex.strata.core.unity.UnityUnsupportedVersionException
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
-import kotlinx.coroutines.withContext
+import kotlinx.coroutines.runInterruptible
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -38,6 +44,7 @@ data class UnityAssetUiState(
     val editedFiles: Map<String, File> = emptyMap(),
     val replacements: Map<String, File> = emptyMap(),
     val textInfos: Map<String, UnityTextInfo> = emptyMap(),
+    val textIssues: Map<String, UnityTextUnavailableReason> = emptyMap(),
     val exportedTexts: Map<String, File> = emptyMap(),
     val navigateTo: String? = null,
     val output: File? = null,
@@ -45,10 +52,6 @@ data class UnityAssetUiState(
 )
 
 class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
-    private companion object {
-        const val MAX_TEXT_SCAN_OBJECTS = 5_000
-    }
-
     private val _state = MutableStateFlow(UnityAssetUiState())
     val state: StateFlow<UnityAssetUiState> = _state.asStateFlow()
 
@@ -56,6 +59,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
     private var stageDir: File? = null
     private var workingBaselines: Map<String, Pair<Long, Long>> = emptyMap()
     private var exportedBaselines: Map<String, Pair<Long, Long>> = emptyMap()
+    private val inspectingNames = HashSet<String>()
 
     fun open(path: String) {
         val current = _state.value
@@ -66,6 +70,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         document = null
         workingBaselines = emptyMap()
         exportedBaselines = emptyMap()
+        inspectingNames.clear()
         val newStageDir = File(getApplication<Application>().cacheDir, "unity-editor/${path.hashCode().toUInt().toString(16)}-${System.nanoTime()}")
         newStageDir.mkdirs()
         stageDir = newStageDir
@@ -73,31 +78,65 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
 
         viewModelScope.launch {
             try {
-                val (probe, parsed) = withContext(Dispatchers.IO) {
+                val (probe, parsed) = runInterruptible(Dispatchers.IO) {
                     val file = File(path)
                     val probe = UnityBundleReader.probe(file)
                     val parsed = if (probe.bundleSupported) UnityBundleReader.open(file, getApplication<Application>().cacheDir) else null
                     probe to parsed
                 }
                 document = parsed
-                val infos = withContext(Dispatchers.IO) {
-                    if (parsed?.supportsTextEditing == true && parsed.summary.entries.size <= MAX_TEXT_SCAN_OBJECTS) {
-                        parsed.summary.entries.mapNotNull { entry ->
-                            parsed.textInfo(entry)?.let { entry.name to it }
-                        }.toMap()
-                    } else {
-                        emptyMap()
-                    }
+                _state.update {
+                    it.copy(
+                        loading = false,
+                        probe = probe,
+                        document = parsed,
+                    )
                 }
-                _state.update { it.copy(loading = false, probe = probe, document = parsed, textInfos = infos) }
-            } catch (_: Exception) {
-                _state.update { it.copy(loading = false, error = getApplication<Application>().getString(R.string.unity_load_failed)) }
+            } catch (e: CancellationException) {
+                document?.close()
+                document = null
+                throw e
+            } catch (e: Exception) {
+                document?.close()
+                document = null
+                val message = if (e is UnityUnsupportedVersionException) {
+                    getApplication<Application>().getString(R.string.unity_unsupported_version)
+                } else {
+                    getApplication<Application>().getString(R.string.unity_load_failed)
+                }
+                _state.update { it.copy(loading = false, error = message) }
             }
         }
     }
 
     fun select(name: String?) {
         _state.update { it.copy(selectedName = name) }
+        if (name == null || name in _state.value.textInfos || name in _state.value.textIssues) return
+        val doc = document ?: return
+        val entry = doc.summary.entries.firstOrNull { it.name == name } ?: return
+        if (!inspectingNames.add(name)) return
+        viewModelScope.launch {
+            try {
+                val inspection = runInterruptible(Dispatchers.IO) { doc.inspectText(entry) }
+                if (document !== doc) return@launch
+                _state.update { current ->
+                    when (inspection) {
+                        is UnityTextInspection.Editable -> current.copy(
+                            textInfos = current.textInfos + (name to inspection.info),
+                            textIssues = current.textIssues - name,
+                        )
+                        is UnityTextInspection.Unavailable -> current.copy(
+                            textIssues = current.textIssues + (name to inspection.reason),
+                            textInfos = current.textInfos - name,
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                throw e
+            } finally {
+                inspectingNames.remove(name)
+            }
+        }
     }
 
     suspend fun fileFor(entry: UnityBundleEntry): File {
@@ -109,7 +148,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         val index = doc.summary.entries.indexOf(entry).coerceAtLeast(0)
         val suffix = entry.displayName.substringAfterLast('.', "").takeIf { it.length in 1..10 }?.let { ".$it" }.orEmpty()
         val target = File(dir, "entry-$index$suffix")
-        withContext(Dispatchers.IO) { doc.copyEntry(entry, target) }
+        runInterruptible(Dispatchers.IO) { doc.copyEntry(entry, target) }
         workingBaselines = workingBaselines + (entry.name to (target.length() to target.lastModified()))
         _state.update { it.copy(workingFiles = it.workingFiles + (entry.name to target)) }
         return target
@@ -122,7 +161,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         val suffix = entry.displayName.substringAfterLast('.', "").takeIf { it.length in 1..10 }?.let { ".$it" }.orEmpty()
         val staged = File(dir, "replacement-$index-${System.nanoTime()}$suffix")
         try {
-            withContext(Dispatchers.IO) {
+            runInterruptible(Dispatchers.IO) {
                 val input = resolver.openInputStream(uri) ?: throw IOException("Could not open replacement")
                 input.use { source -> FileOutputStream(staged).use { target -> source.copyTo(target) } }
             }
@@ -146,7 +185,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(busy = true) }
         viewModelScope.launch {
             try {
-                val result = withContext(Dispatchers.IO) {
+                val result = runInterruptible(Dispatchers.IO) {
                     val texts = doc.exportTexts(entry) ?: throw IOException("Entry has no editable text")
                     val index = doc.summary.entries.indexOf(entry).coerceAtLeast(0)
                     val safe = entry.displayName.replace(Regex("[^A-Za-z0-9._-]"), "_").take(48).ifEmpty { "object" }
@@ -163,8 +202,18 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                         message = getApplication<Application>().getString(R.string.unity_texts_exported, result.second),
                     )
                 }
-            } catch (_: Exception) {
-                _state.update { it.copy(busy = false, message = getApplication<Application>().getString(R.string.unity_operation_failed)) }
+            } catch (e: CancellationException) {
+                _state.update { it.copy(busy = false, message = getApplication<Application>().getString(R.string.unity_operation_cancelled)) }
+                throw e
+            } catch (e: Exception) {
+                val detail = e.message?.takeIf { it.isNotBlank() }
+                val message = when {
+                    e is UnityDocumentClosedException -> getApplication<Application>().getString(R.string.unity_staging_unavailable)
+                    e is UnityOperationCancelledException -> getApplication<Application>().getString(R.string.unity_operation_cancelled)
+                    detail != null -> getApplication<Application>().getString(R.string.unity_operation_failed_detail, detail)
+                    else -> getApplication<Application>().getString(R.string.unity_operation_failed)
+                }
+                _state.update { it.copy(busy = false, message = message) }
             }
         }
     }
@@ -195,7 +244,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(busy = true, error = null) }
         viewModelScope.launch {
             try {
-                val output = withContext(Dispatchers.IO) {
+                val output = runInterruptible(Dispatchers.IO) {
                     UnityPackageRepacker.repack(doc, collectChanges(doc, current), parents, getApplication<Application>().cacheDir)
                 }
                 _state.update {
@@ -205,9 +254,26 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                         busy = false,
                     )
                 }
+            } catch (e: CancellationException) {
+                _state.update {
+                    it.copy(
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                        busy = false,
+                    )
+                }
+                throw e
             } catch (e: Exception) {
-                val message = if (e is UnityFormatException && e.message?.contains("JSON") == true) {
-                    getApplication<Application>().getString(R.string.unity_texts_bad_json, e.message ?: "")
+                val detail = e.message?.takeIf { it.isNotBlank() }
+                val message = if (e is UnityOperationCancelledException) {
+                    getApplication<Application>().getString(R.string.unity_operation_cancelled)
+                } else if (e is UnityDocumentClosedException) {
+                    getApplication<Application>().getString(R.string.unity_staging_unavailable)
+                } else if (e is UnityUnsupportedVersionException) {
+                    getApplication<Application>().getString(R.string.unity_unsupported_version)
+                } else if (e is UnityFormatException && detail?.contains("JSON") == true) {
+                    getApplication<Application>().getString(R.string.unity_texts_bad_json, detail)
+                } else if (detail != null) {
+                    getApplication<Application>().getString(R.string.unity_operation_failed_detail, detail)
                 } else {
                     getApplication<Application>().getString(R.string.unity_operation_failed)
                 }

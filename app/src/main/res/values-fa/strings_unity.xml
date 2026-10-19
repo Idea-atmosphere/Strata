@@ -41,4 +41,15 @@
     <string name="unity_texts_exported">‏%1$d رشتهٔ متنی به‌صورت JSON باز شد — ویرایش و ذخیره کنید، سپس بازبسته‌بندی را بزنید.</string>
     <string name="unity_texts_badge">‏%1$d متن · %2$s</string>
     <string name="unity_texts_bad_json">فایل JSON ویرایش‌شده معتبر نیست: %1$s</string>
+    <string name="unity_operation_failed_detail">عملیات انجام نشد: %1$s</string>
+    <string name="unity_text_not_serialized">این ورودی یک فایل سریال‌شدهٔ Unity نیست.</string>
+    <string name="unity_text_no_type_info">این فایل اطلاعات نوع ندارد؛ بنابراین ویرایش امن متن‌های سفارشی آن ممکن نیست.</string>
+    <string name="unity_text_unsupported_object">برای این نوع شیء هنوز رمزگشای متنی امنی وجود ندارد.</string>
+    <string name="unity_text_none_found">فایل با موفقیت خوانده شد، اما متن قابل‌ویرایشی پیدا نشد.</string>
+    <string name="unity_text_too_many_objects">تعداد اشیای این فایل برای پویش امن متن بیش از حد زیاد است.</string>
+    <string name="unity_text_decode_failed">رمزگشایی امن این شیء ممکن نشد.</string>
+    <string name="unity_text_document_closed">دادهٔ موقت Unity دیگر در دسترس نیست.</string>
+    <string name="unity_operation_cancelled">عملیات لغو شد.</string>
+    <string name="unity_unsupported_version">نسخهٔ این فایل Unity پشتیبانی نمی‌شود.</string>
+    <string name="unity_staging_unavailable">دادهٔ موقت Unity دیگر در دسترس نیست؛ فایل را دوباره باز کنید.</string>
 </resources>

@@ -57,6 +57,7 @@ import dev.cluvex.strata.core.unity.UnityBundleEntry
 import dev.cluvex.strata.core.unity.UnityFileKind
 import dev.cluvex.strata.core.unity.UnityProbe
 import dev.cluvex.strata.core.unity.UnityTextInfo
+import dev.cluvex.strata.core.unity.UnityTextUnavailableReason
 import dev.cluvex.strata.core.util.Formatters
 import dev.cluvex.strata.ui.isolated
 import kotlinx.coroutines.Dispatchers
@@ -202,6 +203,7 @@ fun UnityAssetScreen(
                                     selected = state.selectedName == entry.name,
                                     modified = entry.name in state.replacements || entry.name in state.editedFiles,
                                     textInfo = state.textInfos[entry.name],
+                                    textIssue = state.textIssues[entry.name],
                                     onClick = { vm.select(entry.name) },
                                 )
                             }
@@ -231,6 +233,7 @@ fun UnityAssetScreen(
                             } else {
                                 null
                             },
+                            textIssue = state.textIssues[entry.name],
                         )
                     } ?: Text(stringResource(R.string.unity_select_entry), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
 
@@ -305,6 +308,7 @@ private fun UnityEntryRow(
     selected: Boolean,
     modified: Boolean,
     textInfo: UnityTextInfo? = null,
+    textIssue: UnityTextUnavailableReason? = null,
     onClick: () -> Unit,
 ) {
     Surface(
@@ -321,6 +325,14 @@ private fun UnityEntryRow(
                         stringResource(R.string.unity_texts_badge, textInfo.stringCount, textInfo.objectName ?: textInfo.className),
                         style = MaterialTheme.typography.labelSmall,
                         color = MaterialTheme.colorScheme.primary,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                } else if (textIssue != null) {
+                    Text(
+                        unityTextIssueLabel(textIssue),
+                        style = MaterialTheme.typography.labelSmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
@@ -344,12 +356,21 @@ private fun UnityEntryActions(
     onExport: () -> Unit,
     onReplace: () -> Unit,
     onExportTexts: (() -> Unit)? = null,
+    textIssue: UnityTextUnavailableReason? = null,
 ) {
     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Column(Modifier.padding(12.dp)) {
             Text(isolated(entry.name), style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
             Text(stringResource(R.string.unity_entry_size, Formatters.size(entry.size)), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(stringResource(R.string.unity_entry_flags, "0x${entry.flags.toString(16).uppercase().padStart(8, '0')}"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+            if (textIssue != null) {
+                Text(
+                    unityTextIssueLabel(textIssue),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.tertiary,
+                    modifier = Modifier.padding(top = 4.dp),
+                )
+            }
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 TextButton(onClick = onOpen, enabled = !busy, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.unity_open_entry), maxLines = 1) }
                 TextButton(onClick = onExport, enabled = !busy, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.unity_export_entry), maxLines = 1) }
@@ -362,6 +383,18 @@ private fun UnityEntryActions(
             }
         }
     }
+}
+
+@Composable
+private fun unityTextIssueLabel(reason: UnityTextUnavailableReason): String = when (reason) {
+    UnityTextUnavailableReason.NOT_SERIALIZED_FILE -> stringResource(R.string.unity_text_not_serialized)
+    UnityTextUnavailableReason.NO_TYPE_INFORMATION -> stringResource(R.string.unity_text_no_type_info)
+    UnityTextUnavailableReason.UNSUPPORTED_OBJECT -> stringResource(R.string.unity_text_unsupported_object)
+    UnityTextUnavailableReason.UNSUPPORTED_VERSION -> stringResource(R.string.unity_unsupported_version)
+    UnityTextUnavailableReason.NO_TEXT -> stringResource(R.string.unity_text_none_found)
+    UnityTextUnavailableReason.TOO_MANY_OBJECTS -> stringResource(R.string.unity_text_too_many_objects)
+    UnityTextUnavailableReason.DECODE_FAILED -> stringResource(R.string.unity_text_decode_failed)
+    UnityTextUnavailableReason.DOCUMENT_CLOSED -> stringResource(R.string.unity_text_document_closed)
 }
 
 @Composable

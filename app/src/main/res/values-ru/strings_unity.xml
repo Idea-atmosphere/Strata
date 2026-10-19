@@ -43,4 +43,15 @@
     <string name="unity_texts_exported">Открыто строк: %1$d в JSON — отредактируйте, сохраните и нажмите пересборку.</string>
     <string name="unity_texts_badge">Текстов: %1$d · %2$s</string>
     <string name="unity_texts_bad_json">Изменённый JSON повреждён: %1$s</string>
+    <string name="unity_operation_failed_detail">Ошибка операции: %1$s</string>
+    <string name="unity_text_not_serialized">Эта запись не является сериализованным файлом Unity.</string>
+    <string name="unity_text_no_type_info">В файле нет сведений о типах; безопасное редактирование текста невозможно.</string>
+    <string name="unity_text_unsupported_object">Для этого типа объекта пока нет безопасного текстового декодера.</string>
+    <string name="unity_text_none_found">Файл прочитан, но редактируемый текст не найден.</string>
+    <string name="unity_text_too_many_objects">В файле слишком много объектов для безопасного поиска текста.</string>
+    <string name="unity_text_decode_failed">Не удалось безопасно декодировать объект.</string>
+    <string name="unity_text_document_closed">Временные данные Unity больше недоступны.</string>
+    <string name="unity_operation_cancelled">Операция отменена.</string>
+    <string name="unity_unsupported_version">Эта версия файла Unity не поддерживается.</string>
+    <string name="unity_staging_unavailable">Временные данные Unity больше недоступны; откройте файл заново.</string>
 </resources>

@@ -40,4 +40,15 @@
     <string name="unity_texts_exported">已以 JSON 打开 %1$d 条文本 — 编辑保存后点击重新打包。</string>
     <string name="unity_texts_badge">%1$d 条文本 · %2$s</string>
     <string name="unity_texts_bad_json">编辑后的 JSON 无效：%1$s</string>
+    <string name="unity_operation_failed_detail">操作失败：%1$s</string>
+    <string name="unity_text_not_serialized">此条目不是 Unity 序列化文件。</string>
+    <string name="unity_text_no_type_info">此文件没有类型信息，无法安全编辑其自定义文本。</string>
+    <string name="unity_text_unsupported_object">此对象类型尚无安全的文本解码器。</string>
+    <string name="unity_text_none_found">文件已解码，但未找到可编辑文本。</string>
+    <string name="unity_text_too_many_objects">此文件的对象过多，无法进行安全文本扫描。</string>
+    <string name="unity_text_decode_failed">无法安全解码此对象。</string>
+    <string name="unity_text_document_closed">暂存的 Unity 数据已不可用。</string>
+    <string name="unity_operation_cancelled">操作已取消。</string>
+    <string name="unity_unsupported_version">不支持此 Unity 文件版本。</string>
+    <string name="unity_staging_unavailable">暂存的 Unity 数据已不可用；请重新打开文件。</string>
 </resources>

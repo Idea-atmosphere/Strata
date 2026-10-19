@@ -41,4 +41,15 @@
     <string name="unity_texts_exported">Opened %1$d text entries as JSON — edit, save, then tap repack.</string>
     <string name="unity_texts_badge">%1$d texts · %2$s</string>
     <string name="unity_texts_bad_json">The edited JSON is invalid: %1$s</string>
+    <string name="unity_operation_failed_detail">Operation failed: %1$s</string>
+    <string name="unity_text_not_serialized">This entry is not a Unity serialized file.</string>
+    <string name="unity_text_no_type_info">This file has no type information, so its custom text cannot be edited safely.</string>
+    <string name="unity_text_unsupported_object">This object type has no safe text decoder yet.</string>
+    <string name="unity_text_none_found">The file was decoded, but no editable text was found.</string>
+    <string name="unity_text_too_many_objects">This file has too many objects for the safe text scan.</string>
+    <string name="unity_text_decode_failed">The object could not be decoded safely.</string>
+    <string name="unity_text_document_closed">The staged Unity data is no longer available.</string>
+    <string name="unity_operation_cancelled">Operation cancelled.</string>
+    <string name="unity_unsupported_version">This Unity file version is not supported.</string>
+    <string name="unity_staging_unavailable">The staged Unity data is no longer available; reopen the file.</string>
 </resources>
