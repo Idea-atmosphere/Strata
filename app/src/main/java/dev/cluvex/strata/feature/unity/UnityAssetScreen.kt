@@ -14,6 +14,8 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
+import androidx.compose.foundation.lazy.LazyRow
+import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
@@ -27,6 +29,7 @@ import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
+import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
@@ -53,6 +56,9 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.cluvex.strata.R
 import dev.cluvex.strata.core.archive.ArchiveParent
 import dev.cluvex.strata.core.model.FileItem
+import dev.cluvex.strata.core.unity.LocalizationAddLanguagePlan
+import dev.cluvex.strata.core.unity.LocalizationImportPlan
+import dev.cluvex.strata.core.unity.LocalizationSource
 import dev.cluvex.strata.core.unity.UnityBundleDocument
 import dev.cluvex.strata.core.unity.UnityBundleEntry
 import dev.cluvex.strata.core.unity.UnityBundleRewriteEstimate
@@ -89,6 +95,9 @@ fun UnityAssetScreen(
     var localBusy by remember(path) { mutableStateOf(false) }
     var signPrompt by remember(path) { mutableStateOf(false) }
     var fontRewritePrompt by remember(path) { mutableStateOf<UnityBundleRewriteEstimate?>(null) }
+    var addLanguagePrompt by remember(path) { mutableStateOf(false) }
+    var newLanguageName by remember(path) { mutableStateOf("") }
+    var newLanguageCode by remember(path) { mutableStateOf("") }
 
     LaunchedEffect(path, refreshToken) {
         vm.open(path)
@@ -114,6 +123,13 @@ fun UnityAssetScreen(
     val document = state.document
     val selectedEntry = remember(document, state.selectedName) {
         document?.summary?.entries?.firstOrNull { it.name == state.selectedName }
+    }
+    val selectedLocalization = remember(
+        state.localizationSources,
+        state.selectedLocalizationTableId,
+    ) {
+        val tableId = state.selectedLocalizationTableId
+        state.localizationSources.values.flatten().firstOrNull { it.origin.tableId == tableId }
     }
     val busy = state.busy || localBusy
 
@@ -260,6 +276,30 @@ fun UnityAssetScreen(
                             onToggleReverseBidi = vm::setReverseBidi,
                             textIssue = state.textIssues[entry.name],
                         )
+                        LocalizationActions(
+                            busy = busy,
+                            sources = state.localizationSources[entry.name].orEmpty(),
+                            selected = selectedLocalization?.takeIf { it.origin.entryName == entry.name },
+                            sourceLanguageCode = state.localizationSourceLanguageCode,
+                            addPlan = state.localizationAddPlan,
+                            importPlan = state.localizationImportPlan,
+                            hasTsv = state.localizationTsv?.isFile == true,
+                            textTransformOptions = state.textTransformOptions,
+                            onToggleShapeArabic = vm::setShapeArabic,
+                            onToggleReverseBidi = vm::setReverseBidi,
+                            onFind = { vm.inspectLocalizations(entry) },
+                            onSelectTable = vm::selectLocalizationTable,
+                            onSelectSourceLanguage = vm::setLocalizationSourceLanguage,
+                            onExportAll = { vm.exportLocalization() },
+                            onExportLanguage = vm::exportLocalization,
+                            onAddLanguage = {
+                                newLanguageName = ""
+                                newLanguageCode = ""
+                                addLanguagePrompt = true
+                            },
+                            onValidateImport = vm::planLocalizationImport,
+                            onApply = { vm.applyLocalizationPlan(entry) },
+                        )
                     } ?: Text(stringResource(R.string.unity_select_entry), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
 
                     val changedCount = state.replacements.size + state.editedFiles.keys.count { it !in state.replacements }
@@ -295,6 +335,43 @@ fun UnityAssetScreen(
                 else -> UnsupportedPanel(state.probe)
             }
         }
+    }
+
+    if (addLanguagePrompt) {
+        AlertDialog(
+            onDismissRequest = { addLanguagePrompt = false },
+            title = { Text(stringResource(R.string.unity_localization_add_language)) },
+            text = {
+                Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+                    OutlinedTextField(
+                        value = newLanguageName,
+                        onValueChange = { newLanguageName = it },
+                        label = { Text(stringResource(R.string.unity_localization_language_name)) },
+                        singleLine = true,
+                    )
+                    OutlinedTextField(
+                        value = newLanguageCode,
+                        onValueChange = { newLanguageCode = it },
+                        label = { Text(stringResource(R.string.unity_localization_language_code)) },
+                        singleLine = true,
+                    )
+                }
+            },
+            confirmButton = {
+                TextButton(
+                    enabled = newLanguageName.isNotBlank() && newLanguageCode.isNotBlank(),
+                    onClick = {
+                        vm.planAddLocalizationLanguage(newLanguageName, newLanguageCode)
+                        addLanguagePrompt = false
+                    },
+                ) { Text(stringResource(R.string.unity_localization_preview)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { addLanguagePrompt = false }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            },
+        )
     }
 
     if (signPrompt) {
@@ -510,6 +587,165 @@ private fun UnityEntryActions(
 }
 
 @Composable
+private fun LocalizationActions(
+    busy: Boolean,
+    sources: List<LocalizationSource>,
+    selected: LocalizationSource?,
+    sourceLanguageCode: String?,
+    addPlan: LocalizationAddLanguagePlan?,
+    importPlan: LocalizationImportPlan?,
+    hasTsv: Boolean,
+    textTransformOptions: UnityTextTransformOptions,
+    onToggleShapeArabic: (Boolean) -> Unit,
+    onToggleReverseBidi: (Boolean) -> Unit,
+    onFind: () -> Unit,
+    onSelectTable: (String) -> Unit,
+    onSelectSourceLanguage: (String) -> Unit,
+    onExportAll: () -> Unit,
+    onExportLanguage: (String) -> Unit,
+    onAddLanguage: () -> Unit,
+    onValidateImport: () -> Unit,
+    onApply: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(stringResource(R.string.unity_localization_title), style = MaterialTheme.typography.titleSmall)
+            if (sources.isEmpty()) {
+                OutlinedButton(onClick = onFind, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.unity_localization_find))
+                }
+            } else {
+                Text(
+                    stringResource(R.string.unity_localization_tables_summary, sources.size, sources.sumOf { it.terms.size }),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                    items(sources, key = { it.origin.tableId }) { source ->
+                        if (source.origin.tableId == selected?.origin?.tableId) {
+                            Button(onClick = { onSelectTable(source.origin.tableId) }, enabled = !busy) {
+                                Text(source.name, maxLines = 1)
+                            }
+                        } else {
+                            OutlinedButton(onClick = { onSelectTable(source.origin.tableId) }, enabled = !busy) {
+                                Text(source.name, maxLines = 1)
+                            }
+                        }
+                    }
+                }
+                selected?.let { table ->
+                    Text(
+                        stringResource(
+                            R.string.unity_localization_table_detail,
+                            table.languages.size,
+                            table.terms.size,
+                        ),
+                        style = MaterialTheme.typography.labelMedium,
+                    )
+                    Text(
+                        stringResource(R.string.unity_localization_source_language),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                        items(table.languages, key = { it.code }) { language ->
+                            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                                TextButton(
+                                    onClick = { onSelectSourceLanguage(language.code) },
+                                    enabled = !busy,
+                                ) {
+                                    Text(
+                                        if (language.code == sourceLanguageCode) "✓ ${language.code}" else language.code,
+                                        maxLines = 1,
+                                    )
+                                }
+                                TextButton(
+                                    onClick = { onExportLanguage(language.code) },
+                                    enabled = !busy,
+                                ) {
+                                    Text(stringResource(R.string.unity_localization_export_one_short), maxLines = 1)
+                                }
+                            }
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = textTransformOptions.shapeArabic,
+                                onCheckedChange = onToggleShapeArabic,
+                                enabled = !busy,
+                            )
+                            Text(stringResource(R.string.unity_shape_arabic), style = MaterialTheme.typography.bodySmall)
+                        }
+                        Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
+                            Checkbox(
+                                checked = textTransformOptions.reverseBidi,
+                                onCheckedChange = onToggleReverseBidi,
+                                enabled = !busy,
+                            )
+                            Text(stringResource(R.string.unity_reverse_bidi), style = MaterialTheme.typography.bodySmall)
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(onClick = onExportAll, enabled = !busy, modifier = Modifier.weight(1f)) {
+                            Text(stringResource(R.string.unity_localization_export_all), maxLines = 1)
+                        }
+                        OutlinedButton(onClick = onAddLanguage, enabled = !busy, modifier = Modifier.weight(1f)) {
+                            Text(stringResource(R.string.unity_localization_add_language), maxLines = 1)
+                        }
+                    }
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                        OutlinedButton(
+                            onClick = onValidateImport,
+                            enabled = !busy && hasTsv,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(stringResource(R.string.unity_localization_validate_import), maxLines = 1)
+                        }
+                        Button(
+                            onClick = onApply,
+                            enabled = !busy && (addPlan?.canApply == true || importPlan?.canApply == true),
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(stringResource(R.string.unity_localization_apply), maxLines = 1)
+                        }
+                    }
+                    addPlan?.let { plan ->
+                        Text(
+                            stringResource(
+                                R.string.unity_localization_add_preview,
+                                plan.termsUpdated,
+                                plan.estimatedDataDeltaBytes,
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (plan.canApply) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    importPlan?.let { plan ->
+                        Text(
+                            stringResource(
+                                R.string.unity_localization_import_preview,
+                                plan.changes.size,
+                                plan.unknownKeyCount,
+                                plan.missingKeyCount,
+                                plan.emptyCellCount,
+                                plan.placeholderFailureCount,
+                            ),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (plan.canApply) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
+                }
+            }
+        }
+    }
+}
+
+@Composable
 private fun unityTextIssueLabel(reason: UnityTextUnavailableReason): String = when (reason) {
     UnityTextUnavailableReason.NOT_SERIALIZED_FILE -> stringResource(R.string.unity_text_not_serialized)
     UnityTextUnavailableReason.NO_TYPE_INFORMATION -> stringResource(R.string.unity_text_no_type_info)
@@ -523,6 +759,12 @@ private fun unityTextIssueLabel(reason: UnityTextUnavailableReason): String = wh
     UnityTextUnavailableReason.FONT_STATIC_NO_SOURCE -> stringResource(R.string.unity_text_font_static_no_source)
     UnityTextUnavailableReason.FONT_ATLAS_FULL -> stringResource(R.string.unity_text_font_atlas_full)
     UnityTextUnavailableReason.FONT_ASSET_NOT_FOUND -> stringResource(R.string.unity_text_font_not_found)
+    UnityTextUnavailableReason.LOCALIZATION_TABLE_NOT_FOUND -> stringResource(R.string.unity_localization_not_found)
+    UnityTextUnavailableReason.LOCALIZATION_SHAPE_AMBIGUOUS -> stringResource(R.string.unity_localization_shape_ambiguous)
+    UnityTextUnavailableReason.LOCALIZATION_ALIGNMENT_INVALID -> stringResource(R.string.unity_localization_alignment_invalid)
+    UnityTextUnavailableReason.LOCALIZATION_TSV_INVALID -> stringResource(R.string.unity_localization_tsv_invalid)
+    UnityTextUnavailableReason.LOCALIZATION_CONFLICT -> stringResource(R.string.unity_localization_conflict)
+    UnityTextUnavailableReason.LOCALIZATION_SIZE_GUARD -> stringResource(R.string.unity_localization_size_guard)
 }
 
 @Composable

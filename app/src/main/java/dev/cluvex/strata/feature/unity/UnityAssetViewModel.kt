@@ -7,6 +7,10 @@ import androidx.lifecycle.AndroidViewModel
 import androidx.lifecycle.viewModelScope
 import dev.cluvex.strata.R
 import dev.cluvex.strata.core.archive.ArchiveParent
+import dev.cluvex.strata.core.unity.LocalizationAddLanguagePlan
+import dev.cluvex.strata.core.unity.LocalizationImportPlan
+import dev.cluvex.strata.core.unity.LocalizationLanguage
+import dev.cluvex.strata.core.unity.LocalizationSource
 import dev.cluvex.strata.core.unity.TypeTreeCodec
 import dev.cluvex.strata.core.unity.UnityBundleDocument
 import dev.cluvex.strata.core.unity.UnityBundleEntry
@@ -18,6 +22,9 @@ import dev.cluvex.strata.core.unity.UnityFontReport
 import dev.cluvex.strata.core.unity.UnityFormatException
 import dev.cluvex.strata.core.unity.UnityOperationCancelledException
 import dev.cluvex.strata.core.unity.UnityPackageRepacker
+import dev.cluvex.strata.core.unity.UnityLocalizationInspection
+import dev.cluvex.strata.core.unity.UnityLocalizationOperations
+import dev.cluvex.strata.core.unity.UnityLocalizationTsv
 import dev.cluvex.strata.core.unity.UnityProbe
 import dev.cluvex.strata.core.unity.UnityTextInfo
 import dev.cluvex.strata.core.unity.UnityTextInspection
@@ -50,6 +57,12 @@ data class UnityAssetUiState(
     val textInfos: Map<String, UnityTextInfo> = emptyMap(),
     val textIssues: Map<String, UnityTextUnavailableReason> = emptyMap(),
     val fontReports: Map<String, UnityFontReport> = emptyMap(),
+    val localizationSources: Map<String, List<LocalizationSource>> = emptyMap(),
+    val selectedLocalizationTableId: String? = null,
+    val localizationAddPlan: LocalizationAddLanguagePlan? = null,
+    val localizationImportPlan: LocalizationImportPlan? = null,
+    val localizationTsv: File? = null,
+    val localizationSourceLanguageCode: String? = null,
     val textTransformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
     val exportedTexts: Map<String, File> = emptyMap(),
     val navigateTo: String? = null,
@@ -66,6 +79,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
     private var workingBaselines: Map<String, Pair<Long, Long>> = emptyMap()
     private var exportedBaselines: Map<String, Pair<Long, Long>> = emptyMap()
     private val inspectingNames = HashSet<String>()
+    private val localizationInspectingNames = HashSet<String>()
 
     fun open(path: String) {
         val current = _state.value
@@ -224,6 +238,266 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Finds structurally valid localization tables inside the selected serialized entry. */
+    fun inspectLocalizations(entry: UnityBundleEntry) {
+        val doc = document ?: return
+        if (_state.value.busy || !localizationInspectingNames.add(entry.name)) return
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            try {
+                val inspection = runInterruptible(Dispatchers.IO) { doc.inspectLocalizations(entry) }
+                if (document !== doc) return@launch
+                _state.update { current ->
+                    when (inspection) {
+                        is UnityLocalizationInspection.Found -> {
+                            val selected = current.selectedLocalizationTableId
+                                ?.takeIf { id -> inspection.sources.any { it.origin.tableId == id } }
+                                ?: inspection.sources.first().origin.tableId
+                            val selectedSource = inspection.sources.first { it.origin.tableId == selected }
+                            current.copy(
+                                localizationSources = current.localizationSources + (entry.name to inspection.sources),
+                                selectedLocalizationTableId = selected,
+                                localizationSourceLanguageCode = selectedSource.languages.first().code,
+                                localizationAddPlan = null,
+                                localizationImportPlan = null,
+                                textIssues = current.textIssues - entry.name,
+                                message = getApplication<Application>().getString(
+                                    R.string.unity_localization_found,
+                                    inspection.sources.size,
+                                    inspection.sources.sumOf { it.terms.size },
+                                ),
+                            )
+                        }
+                        is UnityLocalizationInspection.Unavailable -> current.copy(
+                            textIssues = current.textIssues + (entry.name to inspection.reason),
+                            message = inspection.diagnostic,
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                _state.update { it.copy(message = getApplication<Application>().getString(R.string.unity_operation_cancelled)) }
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(message = localizationFailureMessage(e)) }
+            } finally {
+                localizationInspectingNames.remove(entry.name)
+                if (document === doc) _state.update { it.copy(busy = false) }
+            }
+        }
+    }
+
+    fun selectLocalizationTable(tableId: String) {
+        val source = _state.value.localizationSources.values.flatten().firstOrNull { it.origin.tableId == tableId }
+        _state.update {
+            it.copy(
+                selectedLocalizationTableId = tableId,
+                localizationSourceLanguageCode = source?.languages?.firstOrNull()?.code,
+                localizationAddPlan = null,
+                localizationImportPlan = null,
+            )
+        }
+    }
+
+    fun setLocalizationSourceLanguage(code: String) {
+        val source = selectedLocalizationSource() ?: return
+        if (source.languageIndex(code) < 0) return
+        _state.update {
+            it.copy(
+                localizationSourceLanguageCode = code,
+                localizationImportPlan = null,
+            )
+        }
+    }
+
+    fun exportLocalization(languageCode: String? = null) {
+        val source = selectedLocalizationSource() ?: return
+        val dir = stageDir ?: return
+        val options = _state.value.textTransformOptions
+        val sourceCode = _state.value.localizationSourceLanguageCode
+            ?.takeIf { source.languageIndex(it) >= 0 }
+            ?: source.languages.first().code
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            try {
+                val output = runInterruptible(Dispatchers.IO) {
+                    val tableTag = source.origin.tableId.hashCode().toUInt().toString(16)
+                    val languageTag = languageCode ?: "all"
+                    val file = File(dir, "localization-$tableTag-$languageTag.tsv")
+                    val text = if (languageCode == null) {
+                        UnityLocalizationTsv.exportAll(source, options, sourceCode)
+                    } else {
+                        UnityLocalizationTsv.exportLanguage(source, languageCode, options, sourceCode)
+                    }
+                    file.writeText(text, Charsets.UTF_8)
+                    file
+                }
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        localizationTsv = output,
+                        navigateTo = output.path,
+                        message = getApplication<Application>().getString(R.string.unity_localization_exported, output.path),
+                    )
+                }
+            } catch (e: CancellationException) {
+                _state.update { it.copy(busy = false, message = getApplication<Application>().getString(R.string.unity_operation_cancelled)) }
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(busy = false, message = localizationFailureMessage(e)) }
+            }
+        }
+    }
+
+    fun planAddLocalizationLanguage(name: String, code: String, flags: Int = 0) {
+        val source = selectedLocalizationSource() ?: return
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            try {
+                val plan = runInterruptible(Dispatchers.IO) {
+                    UnityLocalizationOperations.planAddLanguage(
+                        source,
+                        LocalizationLanguage(name.trim(), code.trim(), flags),
+                    )
+                }
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        localizationAddPlan = plan,
+                        localizationImportPlan = null,
+                        message = if (plan.canApply) {
+                            getApplication<Application>().getString(
+                                R.string.unity_localization_add_preview,
+                                plan.termsUpdated,
+                                plan.estimatedDataDeltaBytes,
+                            )
+                        } else {
+                            plan.diagnostic
+                        },
+                    )
+                }
+            } catch (e: CancellationException) {
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                    )
+                }
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(busy = false, message = localizationFailureMessage(e)) }
+            }
+        }
+    }
+
+    /** Parses the edited TSV on IO and produces a dry-run plan; it never mutates a bundle. */
+    fun planLocalizationImport() {
+        val source = selectedLocalizationSource() ?: return
+        val file = _state.value.localizationTsv ?: return
+        val options = _state.value.textTransformOptions
+        val sourceCode = _state.value.localizationSourceLanguageCode
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            try {
+                val plan = runInterruptible(Dispatchers.IO) {
+                    UnityLocalizationTsv.planImport(
+                        source,
+                        file.readText(Charsets.UTF_8),
+                        options,
+                        sourceCode,
+                    )
+                }
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        localizationImportPlan = plan,
+                        localizationAddPlan = null,
+                        message = getApplication<Application>().getString(
+                            R.string.unity_localization_import_preview,
+                            plan.changes.size,
+                            plan.unknownKeyCount,
+                            plan.missingKeyCount,
+                            plan.emptyCellCount,
+                            plan.placeholderFailureCount,
+                        ),
+                    )
+                }
+            } catch (e: CancellationException) {
+                _state.update { it.copy(busy = false, message = getApplication<Application>().getString(R.string.unity_operation_cancelled)) }
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(busy = false, message = localizationFailureMessage(e)) }
+            }
+        }
+    }
+
+    /** Applies the current dry-run atomically to a staged entry replacement. */
+    fun applyLocalizationPlan(entry: UnityBundleEntry) {
+        val doc = document ?: return
+        val dir = stageDir ?: return
+        val selected = selectedLocalizationSource() ?: return
+        val state = _state.value
+        val updated = when {
+            state.localizationAddPlan?.canApply == true -> state.localizationAddPlan.updated
+            state.localizationImportPlan?.canApply == true -> state.localizationImportPlan.updated
+            else -> null
+        } ?: return
+        val tables = state.localizationSources[entry.name].orEmpty()
+        if (tables.none { it.origin.tableId == selected.origin.tableId }) return
+        if (state.busy) return
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            val staged = File(
+                dir,
+                "localization-${entry.name.hashCode().toUInt().toString(16)}-${System.nanoTime()}.bin",
+            )
+            try {
+                val rewritten = tables.map { table ->
+                    if (table.origin.tableId == selected.origin.tableId) updated else table
+                }
+                runInterruptible(Dispatchers.IO) {
+                    doc.writeLocalizationReplacement(entry, rewritten, staged)
+                }
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        replacements = it.replacements + (entry.name to staged),
+                        localizationSources = it.localizationSources + (entry.name to rewritten),
+                        localizationAddPlan = null,
+                        localizationImportPlan = null,
+                        localizationTsv = null,
+                        localizationSourceLanguageCode = updated.languages.first().code,
+                        message = getApplication<Application>().getString(R.string.unity_localization_applied),
+                    )
+                }
+            } catch (e: CancellationException) {
+                staged.delete()
+                _state.update { it.copy(busy = false, message = getApplication<Application>().getString(R.string.unity_operation_cancelled)) }
+                throw e
+            } catch (e: Exception) {
+                staged.delete()
+                _state.update { it.copy(busy = false, message = localizationFailureMessage(e)) }
+            }
+        }
+    }
+
+    private fun selectedLocalizationSource(): LocalizationSource? {
+        val id = _state.value.selectedLocalizationTableId ?: return null
+        return _state.value.localizationSources.values.flatten().firstOrNull { it.origin.tableId == id }
+    }
+
+    private fun localizationFailureMessage(error: Exception): String {
+        val detail = error.message?.takeIf { it.isNotBlank() }
+        return when {
+            error is UnityDocumentClosedException -> getApplication<Application>().getString(R.string.unity_staging_unavailable)
+            error is UnityOperationCancelledException -> getApplication<Application>().getString(R.string.unity_operation_cancelled)
+            detail != null -> getApplication<Application>().getString(R.string.unity_operation_failed_detail, detail)
+            else -> getApplication<Application>().getString(R.string.unity_operation_failed)
+        }
+    }
+
     fun consumeNavigate() {
         _state.update { it.copy(navigateTo = null) }
     }
@@ -251,7 +525,14 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val output = runInterruptible(Dispatchers.IO) {
-                    UnityPackageRepacker.repack(doc, collectChanges(doc, current), parents, getApplication<Application>().cacheDir)
+                    val localizationChanged = current.replacements.keys.any { it in current.localizationSources }
+                    UnityPackageRepacker.repack(
+                        document = doc,
+                        replacements = collectChanges(doc, current),
+                        parents = parents,
+                        cacheDir = getApplication<Application>().cacheDir,
+                        maxBundleGrowthRatio = if (localizationChanged) 1.25 else null,
+                    )
                 }
                 _state.update {
                     it.copy(

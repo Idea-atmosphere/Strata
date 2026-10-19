@@ -83,6 +83,12 @@ enum class UnityTextUnavailableReason {
     FONT_STATIC_NO_SOURCE,
     FONT_ATLAS_FULL,
     FONT_ASSET_NOT_FOUND,
+    LOCALIZATION_TABLE_NOT_FOUND,
+    LOCALIZATION_SHAPE_AMBIGUOUS,
+    LOCALIZATION_ALIGNMENT_INVALID,
+    LOCALIZATION_TSV_INVALID,
+    LOCALIZATION_CONFLICT,
+    LOCALIZATION_SIZE_GUARD,
 }
 
 /** Per-entry text capability, including a diagnostic when editing is unsafe or impossible. */
@@ -155,6 +161,8 @@ class UnityBundleDocument internal constructor(
 
     private val embeddedLock = Any()
     private val embeddedIndexes = HashMap<UnityBundleEntry, EmbeddedParse>()
+    private val localizationLock = Any()
+    private val localizationInspections = HashMap<UnityBundleEntry, UnityLocalizationInspection>()
     private val lifecycleLock = ReentrantReadWriteLock(true)
     @Volatile private var closed = false
 
@@ -322,6 +330,343 @@ class UnityBundleDocument internal constructor(
         } finally {
             temporaryFiles.forEach { it.delete() }
             rebuiltEntry.delete()
+        }
+    }
+
+    /** Detects localization tables by decoded field shape, never by bundle or asset name. */
+    fun inspectLocalizations(entry: UnityBundleEntry): UnityLocalizationInspection = try {
+        withOpenDocument { inspectLocalizationsOpen(entry) }
+    } catch (_: UnityDocumentClosedException) {
+        UnityLocalizationInspection.Unavailable(
+            UnityTextUnavailableReason.DOCUMENT_CLOSED,
+            "Unity document is closed",
+        )
+    }
+
+    private fun inspectLocalizationsOpen(entry: UnityBundleEntry): UnityLocalizationInspection {
+        requireEntry(entry)
+        synchronized(localizationLock) { localizationInspections[entry] }?.let { return it }
+        val result = try {
+            val standalone = serialized
+            if (standalone != null) {
+                inspectLocalizationObject(standalone, entry, entry.name, 0)
+            } else if (summary.signature == "UnityFS") {
+                inspectEmbeddedLocalizations(entry)
+            } else {
+                UnityLocalizationInspection.Unavailable(
+                    UnityTextUnavailableReason.NOT_SERIALIZED_FILE,
+                    "Entry is not a serialized file",
+                )
+            }
+        } catch (error: UnityDocumentClosedException) {
+            throw error
+        } catch (error: UnityOperationCancelledException) {
+            throw error
+        } catch (error: UnityUnsupportedVersionException) {
+            UnityLocalizationInspection.Unavailable(
+                UnityTextUnavailableReason.UNSUPPORTED_VERSION,
+                error.message ?: "Unsupported serialized-file version",
+            )
+        } catch (error: Exception) {
+            if (Thread.currentThread().isInterrupted) throw UnityOperationCancelledException()
+            UnityLocalizationInspection.Unavailable(
+                UnityTextUnavailableReason.DECODE_FAILED,
+                error.message ?: "Localization inspection failed",
+            )
+        }
+        synchronized(localizationLock) { localizationInspections[entry] = result }
+        return result
+    }
+
+    private fun inspectEmbeddedLocalizations(entry: UnityBundleEntry): UnityLocalizationInspection {
+        val embedded = when (val parsed = embedded(entry)) {
+            is EmbeddedParse.Failure -> return UnityLocalizationInspection.Unavailable(parsed.reason, parsed.diagnostic)
+            is EmbeddedParse.Success -> parsed
+        }
+        if (embedded.objectCount > MAX_EMBEDDED_TEXT_OBJECTS) {
+            return UnityLocalizationInspection.Unavailable(
+                UnityTextUnavailableReason.TOO_MANY_OBJECTS,
+                "Serialized entry has ${embedded.objectCount} objects",
+            )
+        }
+        val sources = ArrayList<LocalizationSource>()
+        var firstInvalid: LocalizationShapeResult.Invalid? = null
+        var firstDecodeFailure: SerializedDecodeResult.Failure? = null
+        embedded.parts.forEach { part ->
+            part.summary.entries.forEach objectLoop@{ objectEntry ->
+                ensureUnityOperationActive()
+                when (val decoded = part.index.decodeResult(dataFile, objectEntry)) {
+                    is SerializedDecodeResult.Failure -> if (firstDecodeFailure == null) firstDecodeFailure = decoded
+                    is SerializedDecodeResult.Success -> {
+                        val slot = part.index.slotFor(objectEntry) ?: return@objectLoop
+                        when (
+                            val shape = UnityLocalizationShape.detect(
+                                decoded.value,
+                                entry.name,
+                                part.partIndex,
+                                slot.pathId,
+                                objectEntry.name,
+                            )
+                        ) {
+                            is LocalizationShapeResult.Found -> sources += shape.sources
+                            is LocalizationShapeResult.Invalid -> if (firstInvalid == null) firstInvalid = shape
+                            LocalizationShapeResult.NotFound -> Unit
+                        }
+                    }
+                }
+            }
+        }
+        if (sources.isNotEmpty()) return UnityLocalizationInspection.Found(sources)
+        firstInvalid?.let { invalid ->
+            val reason = if (invalid.diagnostic.contains("ambiguous", ignoreCase = true)) {
+                UnityTextUnavailableReason.LOCALIZATION_SHAPE_AMBIGUOUS
+            } else {
+                UnityTextUnavailableReason.LOCALIZATION_ALIGNMENT_INVALID
+            }
+            return UnityLocalizationInspection.Unavailable(reason, invalid.diagnostic)
+        }
+        if (firstDecodeFailure != null && embedded.objectCount == 1) {
+            return inspectionFailure(firstDecodeFailure!!).let {
+                UnityLocalizationInspection.Unavailable(it.reason, it.diagnostic)
+            }
+        }
+        return UnityLocalizationInspection.Unavailable(
+            UnityTextUnavailableReason.LOCALIZATION_TABLE_NOT_FOUND,
+            "No localization table shape was found in this entry",
+        )
+    }
+
+    private fun inspectLocalizationObject(
+        index: SerializedFileIndex,
+        objectEntry: UnityBundleEntry,
+        bundleEntryName: String,
+        partIndex: Int,
+    ): UnityLocalizationInspection {
+        return when (val decoded = index.decodeResult(dataFile, objectEntry)) {
+            is SerializedDecodeResult.Failure -> inspectionFailure(decoded).let {
+                UnityLocalizationInspection.Unavailable(it.reason, it.diagnostic)
+            }
+            is SerializedDecodeResult.Success -> {
+                val slot = index.slotFor(objectEntry)
+                    ?: return UnityLocalizationInspection.Unavailable(
+                        UnityTextUnavailableReason.DECODE_FAILED,
+                        "Serialized object table is inconsistent",
+                    )
+                when (
+                    val shape = UnityLocalizationShape.detect(
+                        decoded.value,
+                        bundleEntryName,
+                        partIndex,
+                        slot.pathId,
+                        objectEntry.name,
+                    )
+                ) {
+                    is LocalizationShapeResult.Found -> UnityLocalizationInspection.Found(shape.sources)
+                    is LocalizationShapeResult.Invalid -> UnityLocalizationInspection.Unavailable(
+                        if (shape.diagnostic.contains("ambiguous", ignoreCase = true)) {
+                            UnityTextUnavailableReason.LOCALIZATION_SHAPE_AMBIGUOUS
+                        } else {
+                            UnityTextUnavailableReason.LOCALIZATION_ALIGNMENT_INVALID
+                        },
+                        shape.diagnostic,
+                    )
+                    LocalizationShapeResult.NotFound -> UnityLocalizationInspection.Unavailable(
+                        UnityTextUnavailableReason.LOCALIZATION_TABLE_NOT_FOUND,
+                        "Decoded object does not contain a localization table shape",
+                    )
+                }
+            }
+        }
+    }
+
+    /**
+     * Writes a staged replacement for [entry] without loading the entry or bundle as one byte array.
+     * The replacement is reparsed and every supplied table is compared before atomic publication.
+     */
+    fun writeLocalizationReplacement(
+        entry: UnityBundleEntry,
+        sources: List<LocalizationSource>,
+        output: File,
+    ) = withOpenDocument { writeLocalizationReplacementOpen(entry, sources, output) }
+
+    private fun writeLocalizationReplacementOpen(
+        entry: UnityBundleEntry,
+        sources: List<LocalizationSource>,
+        output: File,
+    ) {
+        requireEntry(entry)
+        if (sources.isEmpty()) throw UnityFormatException("No localization tables were supplied")
+        if (sources.any { it.origin.entryName != entry.name }) {
+            throw UnityFormatException("Localization table belongs to a different bundle entry")
+        }
+        val duplicate = sources.groupingBy { it.origin.tableId }.eachCount().entries.firstOrNull { it.value > 1 }
+        if (duplicate != null) throw UnityFormatException("Duplicate localization table '${duplicate.key}'")
+        if (output.exists()) throw IOException("Output already exists: ${output.name}")
+        output.parentFile?.mkdirs()
+        val temporary = temporarySibling(output, "localization")
+        try {
+            val standalone = serialized
+            if (standalone != null) {
+                writeStandaloneLocalizationReplacement(standalone, entry, sources, temporary)
+            } else {
+                writeEmbeddedLocalizationReplacement(entry, embeddedOrThrow(entry), sources, temporary)
+            }
+            RandomAccessFile(temporary, "rw").use { it.fd.sync() }
+            publishTemporary(temporary, output)
+        } catch (error: Throwable) {
+            temporary.delete()
+            throw error
+        }
+    }
+
+    private fun writeStandaloneLocalizationReplacement(
+        index: SerializedFileIndex,
+        entry: UnityBundleEntry,
+        sources: List<LocalizationSource>,
+        output: File,
+    ) {
+        val slot = index.slotFor(entry) ?: throw UnityFormatException("Serialized object table is inconsistent")
+        if (sources.any { it.origin.pathId != slot.pathId || it.origin.partIndex != 0 }) {
+            throw UnityFormatException("Localization table points to a different serialized object")
+        }
+        val value = decodeOrThrow(index, entry)
+        sources.forEach { UnityLocalizationShape.apply(value, it) }
+        verifyLocalizationValue(value, sources)
+        val encoded = index.encode(dataFile, entry, value)
+        FileOutputStream(output).use { stream ->
+            stream.write(encoded)
+            stream.fd.sync()
+        }
+    }
+
+    private fun writeEmbeddedLocalizationReplacement(
+        entry: UnityBundleEntry,
+        embedded: EmbeddedParse.Success,
+        sources: List<LocalizationSource>,
+        output: File,
+    ) {
+        val sourcesByPart = sources.groupBy { it.origin.partIndex }
+        val knownParts = embedded.parts.map { it.partIndex }.toSet()
+        val unknownPart = sourcesByPart.keys.firstOrNull { it !in knownParts }
+        if (unknownPart != null) throw UnityFormatException("Localization table refers to unknown serialized file $unknownPart")
+        val scratch = dataFile.parentFile ?: throw IOException("Unity cache directory is missing")
+        val temporaryFiles = ArrayList<File>()
+        val outputPartOffsets = HashMap<Int, Long>()
+        try {
+            RandomAccessFile(dataFile, "r").use { sourceData ->
+                FileOutputStream(output).buffered(BUFFER_SIZE).use { combinedOut ->
+                    var sourceCursor = 0L
+                    var outputCursor = 0L
+                    embedded.parts.forEach { part ->
+                        ensureUnityOperationActive()
+                        if (part.relativeOffset < sourceCursor) throw UnityFormatException("Embedded serialized-file ranges overlap")
+                        val gap = part.relativeOffset - sourceCursor
+                        if (gap > 0) {
+                            sourceData.seek(entry.offset + sourceCursor)
+                            copyExactly(sourceData, combinedOut, gap)
+                            outputCursor = checkedAdd(outputCursor, gap, "Localization replacement is too large")
+                        }
+                        outputPartOffsets[part.partIndex] = outputCursor
+                        val partSources = sourcesByPart[part.partIndex].orEmpty()
+                        if (partSources.isEmpty()) {
+                            sourceData.seek(entry.offset + part.relativeOffset)
+                            copyExactly(sourceData, combinedOut, part.declaredSize)
+                            outputCursor = checkedAdd(outputCursor, part.declaredSize, "Localization replacement is too large")
+                        } else {
+                            val entriesByName = part.summary.entries.associateBy { it.name }
+                            val replacements = LinkedHashMap<String, File>()
+                            partSources.groupBy { it.origin.pathId }.forEach { (pathId, objectSources) ->
+                                val slot = part.index.slots.firstOrNull { it.pathId == pathId }
+                                    ?: throw UnityFormatException("Localization table refers to unknown object $pathId")
+                                val objectEntry = entriesByName[slot.entryName]
+                                    ?: throw UnityFormatException("Serialized object table is inconsistent for $pathId")
+                                val value = decodeOrThrow(part.index, objectEntry)
+                                objectSources.forEach { UnityLocalizationShape.apply(value, it) }
+                                verifyLocalizationValue(value, objectSources)
+                                val encoded = part.index.encode(dataFile, objectEntry, value)
+                                val objectFile = File(
+                                    scratch,
+                                    ".localization-${part.partIndex}-$pathId-${System.nanoTime()}.bin",
+                                )
+                                objectFile.writeBytes(encoded)
+                                temporaryFiles += objectFile
+                                replacements[slot.entryName] = objectFile
+                            }
+                            val rebuiltPart = File(
+                                scratch,
+                                ".localization-part-${part.partIndex}-${System.nanoTime()}.assets",
+                            )
+                            temporaryFiles += rebuiltPart
+                            part.index.rebuild(rebuiltPart, dataFile, replacements, part.summary.entries)
+                            rebuiltPart.inputStream().buffered(BUFFER_SIZE).use { input ->
+                                input.copyTo(combinedOut, BUFFER_SIZE)
+                            }
+                            outputCursor = checkedAdd(outputCursor, rebuiltPart.length(), "Localization replacement is too large")
+                        }
+                        sourceCursor = checkedAdd(part.relativeOffset, part.declaredSize, "Embedded serialized-file range overflows")
+                    }
+                    if (sourceCursor < entry.size) {
+                        val tail = entry.size - sourceCursor
+                        sourceData.seek(entry.offset + sourceCursor)
+                        copyExactly(sourceData, combinedOut, tail)
+                    }
+                }
+            }
+            verifyEmbeddedLocalizationReplacement(output, sources, outputPartOffsets)
+        } finally {
+            temporaryFiles.forEach { it.delete() }
+            if (Thread.currentThread().isInterrupted) output.delete()
+        }
+    }
+
+    private fun verifyEmbeddedLocalizationReplacement(
+        replacement: File,
+        expected: List<LocalizationSource>,
+        partOffsets: Map<Int, Long>,
+    ) {
+        expected.groupBy { it.origin.partIndex }.forEach { (partIndex, partSources) ->
+            val offset = partOffsets[partIndex]
+                ?: throw UnityFormatException("Rebuilt localization part $partIndex is missing")
+            val (partSummary, partIndexData) = SerializedFileReader.parseEmbedded(
+                replacement,
+                offset,
+                replacement.length() - offset,
+            )
+            val entriesByName = partSummary.entries.associateBy { it.name }
+            partSources.groupBy { it.origin.pathId }.forEach { (pathId, objectSources) ->
+                val slot = partIndexData.slots.firstOrNull { it.pathId == pathId }
+                    ?: throw UnityFormatException("Rebuilt localization object $pathId is missing")
+                val objectEntry = entriesByName[slot.entryName]
+                    ?: throw UnityFormatException("Rebuilt localization object table is inconsistent")
+                val decoded = partIndexData.decodeResult(replacement, objectEntry)
+                val value = (decoded as? SerializedDecodeResult.Success)?.value
+                    ?: throw UnityFormatException("Rebuilt localization object $pathId could not be decoded")
+                verifyLocalizationValue(value, objectSources)
+            }
+        }
+    }
+
+    private fun verifyLocalizationValue(value: UVal, expected: List<LocalizationSource>) {
+        val first = expected.first().origin
+        val detected = UnityLocalizationShape.detect(
+            value,
+            first.entryName,
+            first.partIndex,
+            first.pathId,
+            first.objectEntryName,
+        ) as? LocalizationShapeResult.Found
+            ?: throw UnityFormatException("Rebuilt object no longer has a localization table shape")
+        val actualById = detected.sources.associateBy { it.origin.tableId }
+        expected.forEach { source ->
+            val actual = actualById[source.origin.tableId]
+                ?: throw UnityFormatException("Rebuilt localization table '${source.origin.tableId}' is missing")
+            val alignedTerms = actual.terms.size == source.terms.size &&
+                actual.terms.zip(source.terms).all { (left, right) ->
+                    left.key == right.key && left.values.map { it.orEmpty() } == right.values.map { it.orEmpty() }
+                }
+            if (actual.languages != source.languages || !alignedTerms) {
+                throw UnityFormatException("Rebuilt localization table '${source.origin.tableId}' failed alignment verification")
+            }
         }
     }
 
@@ -1207,6 +1552,7 @@ class UnityBundleDocument internal constructor(
             if (closed) return
             closed = true
             synchronized(embeddedLock) { embeddedIndexes.clear() }
+            synchronized(localizationLock) { localizationInspections.clear() }
             dataFile.delete()
             dataFile.parentFile?.delete()
         } finally {

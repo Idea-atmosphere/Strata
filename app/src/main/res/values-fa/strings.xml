@@ -1,0 +1,27 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="unity_localization_title">جدول‌های بومی‌سازی</string>
+    <string name="unity_localization_find">یافتن جدول‌های بومی‌سازی</string>
+    <string name="unity_localization_found">%1$d جدول با %2$d عبارت پیدا شد</string>
+    <string name="unity_localization_tables_summary">%1$d جدول · %2$d عبارت</string>
+    <string name="unity_localization_table_detail">%1$d زبان · %2$d عبارت</string>
+    <string name="unity_localization_source_language">زبان مبدأ نگه‌دارنده‌ها</string>
+    <string name="unity_localization_export_one_short">TSV</string>
+    <string name="unity_localization_export_all">خروجی همه</string>
+    <string name="unity_localization_exported">فایل TSV در %1$s ذخیره شد</string>
+    <string name="unity_localization_add_language">افزودن زبان</string>
+    <string name="unity_localization_language_name">نام زبان</string>
+    <string name="unity_localization_language_code">کد زبان</string>
+    <string name="unity_localization_preview">پیش‌نمایش</string>
+    <string name="unity_localization_add_preview">اجرای آزمایشی: %1$d عبارت، حدود %2$d بایت داده</string>
+    <string name="unity_localization_validate_import">اعتبارسنجی TSV</string>
+    <string name="unity_localization_import_preview">اجرای آزمایشی: %1$d تغییر · %2$d ناشناخته · %3$d غایب · %4$d خالی · %5$d خطای نگه‌دارنده</string>
+    <string name="unity_localization_apply">اعمال</string>
+    <string name="unity_localization_applied">تغییرات بومی‌سازی مرحله‌بندی و تأیید شد</string>
+    <string name="unity_localization_not_found">هیچ ساختار جدول بومی‌سازی پیدا نشد</string>
+    <string name="unity_localization_shape_ambiguous">ساختار جدول بومی‌سازی مبهم است</string>
+    <string name="unity_localization_alignment_invalid">ستون‌های زبان و عبارت هم‌تراز نیستند</string>
+    <string name="unity_localization_tsv_invalid">فایل TSV بومی‌سازی نامعتبر است</string>
+    <string name="unity_localization_conflict">جدول بومی‌سازی پیش از اعمال تغییر کرده است</string>
+    <string name="unity_localization_size_guard">رشد خروجی از حد ایمنی بومی‌سازی فراتر رفت</string>
+</resources>

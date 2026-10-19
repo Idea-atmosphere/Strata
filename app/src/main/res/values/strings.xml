@@ -1,4 +1,28 @@
 <?xml version="1.0" encoding="utf-8"?>
 <resources>
     <string name="app_name" translatable="false">Strata</string>
+    <string name="unity_localization_title">Localization tables</string>
+    <string name="unity_localization_find">Find localization tables</string>
+    <string name="unity_localization_found">Found %1$d tables with %2$d terms</string>
+    <string name="unity_localization_tables_summary">%1$d tables · %2$d terms</string>
+    <string name="unity_localization_table_detail">%1$d languages · %2$d terms</string>
+    <string name="unity_localization_source_language">Placeholder source language</string>
+    <string name="unity_localization_export_one_short">TSV</string>
+    <string name="unity_localization_export_all">Export all</string>
+    <string name="unity_localization_exported">TSV exported to %1$s</string>
+    <string name="unity_localization_add_language">Add language</string>
+    <string name="unity_localization_language_name">Language name</string>
+    <string name="unity_localization_language_code">Language code</string>
+    <string name="unity_localization_preview">Preview</string>
+    <string name="unity_localization_add_preview">Dry run: %1$d terms, about %2$d data bytes</string>
+    <string name="unity_localization_validate_import">Validate TSV</string>
+    <string name="unity_localization_import_preview">Dry run: %1$d changes · %2$d unknown · %3$d missing · %4$d empty · %5$d placeholder errors</string>
+    <string name="unity_localization_apply">Apply</string>
+    <string name="unity_localization_applied">Localization changes were staged and verified</string>
+    <string name="unity_localization_not_found">No localization table shape was found</string>
+    <string name="unity_localization_shape_ambiguous">Localization table shape is ambiguous</string>
+    <string name="unity_localization_alignment_invalid">Language and term columns are not aligned</string>
+    <string name="unity_localization_tsv_invalid">The localization TSV is invalid</string>
+    <string name="unity_localization_conflict">The localization table changed before apply</string>
+    <string name="unity_localization_size_guard">Output growth exceeded the localization safety limit</string>
 </resources>

@@ -9,11 +9,20 @@ import java.io.IOException
 
 /** Rebuilds a new Unity bundle and, when nested, copies each containing archive outward. */
 object UnityPackageRepacker {
+    /** Source-compatible entry point retained for callers that do not need a growth guard. */
     fun repack(
         document: UnityBundleDocument,
         replacements: Map<String, File>,
         parents: List<ArchiveParent>,
         cacheDir: File,
+    ): File = repack(document, replacements, parents, cacheDir, null)
+
+    fun repack(
+        document: UnityBundleDocument,
+        replacements: Map<String, File>,
+        parents: List<ArchiveParent>,
+        cacheDir: File,
+        maxBundleGrowthRatio: Double?,
     ): File {
         cacheDir.mkdirs()
         val tempDir = File(cacheDir, "unity-repack-${System.nanoTime()}")
@@ -26,6 +35,18 @@ object UnityPackageRepacker {
                 File(tempDir, "rebuilt-bundle.${document.source.extension.ifEmpty { "bundle" }}")
             }
             document.repack(bundle, replacements)
+            if (maxBundleGrowthRatio != null) {
+                try {
+                    UnityLocalizationOperations.verifyBundleGrowth(
+                        sourceBytes = document.source.length(),
+                        outputBytes = bundle.length(),
+                        maxGrowthRatio = maxBundleGrowthRatio,
+                    )
+                } catch (error: UnityLocalizationSizeGuardException) {
+                    bundle.delete()
+                    throw error
+                }
+            }
             var current = bundle
             cleanupFile = bundle
 
