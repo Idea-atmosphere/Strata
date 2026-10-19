@@ -11,13 +11,17 @@ import dev.cluvex.strata.core.unity.TypeTreeCodec
 import dev.cluvex.strata.core.unity.UnityBundleDocument
 import dev.cluvex.strata.core.unity.UnityBundleEntry
 import dev.cluvex.strata.core.unity.UnityBundleReader
+import dev.cluvex.strata.core.unity.UnityBundleRewriteEstimate
 import dev.cluvex.strata.core.unity.UnityDocumentClosedException
+import dev.cluvex.strata.core.unity.UnityFontPatchResult
+import dev.cluvex.strata.core.unity.UnityFontReport
 import dev.cluvex.strata.core.unity.UnityFormatException
 import dev.cluvex.strata.core.unity.UnityOperationCancelledException
 import dev.cluvex.strata.core.unity.UnityPackageRepacker
 import dev.cluvex.strata.core.unity.UnityProbe
 import dev.cluvex.strata.core.unity.UnityTextInfo
 import dev.cluvex.strata.core.unity.UnityTextInspection
+import dev.cluvex.strata.core.unity.UnityTextTransformOptions
 import dev.cluvex.strata.core.unity.UnityTextUnavailableReason
 import dev.cluvex.strata.core.unity.UnityUnsupportedVersionException
 import kotlinx.coroutines.CancellationException
@@ -45,6 +49,8 @@ data class UnityAssetUiState(
     val replacements: Map<String, File> = emptyMap(),
     val textInfos: Map<String, UnityTextInfo> = emptyMap(),
     val textIssues: Map<String, UnityTextUnavailableReason> = emptyMap(),
+    val fontReports: Map<String, UnityFontReport> = emptyMap(),
+    val textTransformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
     val exportedTexts: Map<String, File> = emptyMap(),
     val navigateTo: String? = null,
     val output: File? = null,
@@ -282,6 +288,124 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun setShapeArabic(enabled: Boolean) {
+        exportedBaselines = emptyMap()
+        _state.update {
+            it.copy(textTransformOptions = it.textTransformOptions.copy(shapeArabic = enabled))
+        }
+    }
+
+    fun setReverseBidi(enabled: Boolean) {
+        exportedBaselines = emptyMap()
+        _state.update {
+            it.copy(textTransformOptions = it.textTransformOptions.copy(reverseBidi = enabled))
+        }
+    }
+
+    fun estimateRewrite(): UnityBundleRewriteEstimate? = document?.estimateRewrite()
+
+    fun inspectFonts(entry: UnityBundleEntry) {
+        val doc = document ?: return
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true) }
+        viewModelScope.launch {
+            try {
+                val report = runInterruptible(Dispatchers.IO) { doc.inspectFonts(entry) }
+                if (document !== doc) return@launch
+                _state.update { current ->
+                    current.copy(
+                        busy = false,
+                        fontReports = current.fontReports + (entry.name to report),
+                        message = report.summaryStatement,
+                    )
+                }
+            } catch (e: CancellationException) {
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                    )
+                }
+                throw e
+            } catch (e: Exception) {
+                val detail = e.message?.takeIf { it.isNotBlank() }
+                val message = when {
+                    e is UnityDocumentClosedException -> getApplication<Application>().getString(R.string.unity_staging_unavailable)
+                    e is UnityOperationCancelledException -> getApplication<Application>().getString(R.string.unity_operation_cancelled)
+                    detail != null -> getApplication<Application>().getString(R.string.unity_operation_failed_detail, detail)
+                    else -> getApplication<Application>().getString(R.string.unity_operation_failed)
+                }
+                _state.update { it.copy(busy = false, message = message) }
+            }
+        }
+    }
+
+    fun applyDynamicFont(entry: UnityBundleEntry, ttfUri: Uri?, resolver: ContentResolver) {
+        val doc = document ?: return
+        val dir = stageDir ?: return
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true) }
+        viewModelScope.launch {
+            try {
+                val outcome = runInterruptible(Dispatchers.IO) {
+                    val ttfBytes = if (ttfUri != null) {
+                        resolver.openInputStream(ttfUri)?.use { it.readBytes() }
+                            ?: throw IOException("Could not open selected TTF font")
+                    } else {
+                        null
+                    }
+                    doc.patchFontForDynamicGeneration(entry, ttfBytes)
+                }
+                when (outcome) {
+                    is UnityFontPatchResult.Success -> {
+                        val staged = runInterruptible(Dispatchers.IO) {
+                            File(dir, "font-${entry.name.hashCode().toUInt().toString(16)}-${System.nanoTime()}.bin").apply {
+                                writeBytes(outcome.rebuiltEntryBytes)
+                            }
+                        }
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                replacements = it.replacements + (entry.name to staged),
+                                fontReports = it.fontReports + (entry.name to outcome.updatedReport),
+                                message = getApplication<Application>().getString(
+                                    R.string.unity_font_patch_done,
+                                    outcome.patchedTmpAssets,
+                                ),
+                            )
+                        }
+                    }
+                    is UnityFontPatchResult.Unavailable -> {
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                textIssues = it.textIssues + (entry.name to outcome.reason),
+                                message = outcome.diagnostic,
+                            )
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                    )
+                }
+                throw e
+            } catch (e: Exception) {
+                val detail = e.message?.takeIf { it.isNotBlank() }
+                val message = when {
+                    e is UnityDocumentClosedException -> getApplication<Application>().getString(R.string.unity_staging_unavailable)
+                    e is UnityOperationCancelledException -> getApplication<Application>().getString(R.string.unity_operation_cancelled)
+                    detail != null -> getApplication<Application>().getString(R.string.unity_operation_failed_detail, detail)
+                    else -> getApplication<Application>().getString(R.string.unity_operation_failed)
+                }
+                _state.update { it.copy(busy = false, message = message) }
+            }
+        }
+    }
+
     /** Merges staged edits, picked replacements and any exported text JSON the user has modified. */
     private fun collectChanges(doc: UnityBundleDocument, current: UnityAssetUiState): Map<String, File> {
         val dir = stageDir
@@ -290,10 +414,16 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
             current.exportedTexts.forEach { (name, jsonFile) ->
                 if (!jsonFile.isFile) return@forEach
                 val baseline = exportedBaselines[name]
-                if (baseline != null && jsonFile.length() == baseline.first && jsonFile.lastModified() == baseline.second) return@forEach
+                if (!current.textTransformOptions.isEnabled &&
+                    baseline != null &&
+                    jsonFile.length() == baseline.first &&
+                    jsonFile.lastModified() == baseline.second
+                ) {
+                    return@forEach
+                }
                 val entry = doc.summary.entries.firstOrNull { it.name == name } ?: return@forEach
                 val edits = TypeTreeCodec.parseJson(jsonFile.readText())
-                val bytes = doc.rebuildTexts(entry, edits)
+                val bytes = doc.rebuildTexts(entry, edits, current.textTransformOptions)
                 val staged = File(dir, "text-${name.hashCode().toUInt().toString(16)}-${System.nanoTime()}.bin")
                 staged.writeBytes(bytes)
                 textChanges[name] = staged

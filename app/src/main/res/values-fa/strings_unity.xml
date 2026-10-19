@@ -52,4 +52,16 @@
     <string name="unity_operation_cancelled">عملیات لغو شد.</string>
     <string name="unity_unsupported_version">نسخهٔ این فایل Unity پشتیبانی نمی‌شود.</string>
     <string name="unity_staging_unavailable">دادهٔ موقت Unity دیگر در دسترس نیست؛ فایل را دوباره باز کنید.</string>
+    <string name="unity_text_font_no_glyphs">فونت فاقد گلیف برای خط هدف است.</string>
+    <string name="unity_text_font_static_no_source">فونت TMP ایستا فاقد گلیف فارسی/عربی و بدون فایل TTF منبع است.</string>
+    <string name="unity_text_font_atlas_full">اطلس بافت فونت فضای خالی برای گلیف‌های جدید ندارد.</string>
+    <string name="unity_text_font_not_found">هیچ Font یا TMP_FontAsset سازگاری در این ورودی پیدا نشد.</string>
+    <string name="unity_inspect_fonts">بررسی فونت‌ها</string>
+    <string name="unity_font_report_title">قابلیت فونت (%1$d TMP، %2$d Font)</string>
+    <string name="unity_shape_arabic">شکل‌دهی بافتاری حروف فارسی/عربی</string>
+    <string name="unity_reverse_bidi">بازچینی بصری راست‌به‌چپ (Bidi)</string>
+    <string name="unity_font_enable_dynamic">اتصال فونت پویا (TTF)…</string>
+    <string name="unity_font_rewrite_warning_title">بازنویسی بسته برای تغییر فونت؟</string>
+    <string name="unity_font_rewrite_warning_body">اصلاح فونت در %1$s نیازمند بازخوانی و فشرده‌سازی LZ4 حدود %2$s دادهٔ موقت است (زمان تخمینی %3$d تا %4$d ثانیه).</string>
+    <string name="unity_font_patch_done">‏%1$d فونت TMP به حالت پویا (Dynamic) تبدیل شد. برای ذخیره، بسته را بازسازی کنید.</string>
 </resources>

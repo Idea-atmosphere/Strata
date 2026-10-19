@@ -54,4 +54,16 @@
     <string name="unity_operation_cancelled">Операция отменена.</string>
     <string name="unity_unsupported_version">Эта версия файла Unity не поддерживается.</string>
     <string name="unity_staging_unavailable">Временные данные Unity больше недоступны; откройте файл заново.</string>
+    <string name="unity_text_font_no_glyphs">В шрифте отсутствуют глифы для целевой письменности.</string>
+    <string name="unity_text_font_static_no_source">Статический шрифт TMP не содержит арабских/персидских глифов и исходного TTF.</string>
+    <string name="unity_text_font_atlas_full">В текстурном атласе шрифта нет места для новых глифов.</string>
+    <string name="unity_text_font_not_found">В этой записи не найдено совместимых Font или TMP_FontAsset.</string>
+    <string name="unity_inspect_fonts">Проверить шрифты</string>
+    <string name="unity_font_report_title">Возможности шрифтов (%1$d TMP, %2$d Font)</string>
+    <string name="unity_shape_arabic">Контекстное соединение арабских/персидских букв</string>
+    <string name="unity_reverse_bidi">Визуальная перестановка RTL (Bidi)</string>
+    <string name="unity_font_enable_dynamic">Привязать динамический шрифт TTF…</string>
+    <string name="unity_font_rewrite_warning_title">Перезаписать пакет для обновления шрифта?</string>
+    <string name="unity_font_rewrite_warning_body">Обновление шрифта в %1$s потребует потоковой перезаписи и LZ4-сжатия %2$s временных данных (около %3$d–%4$d с).</string>
+    <string name="unity_font_patch_done">Обновлено шрифтов TMP в динамический режим: %1$d. Пересоберите пакет для сохранения.</string>
 </resources>
