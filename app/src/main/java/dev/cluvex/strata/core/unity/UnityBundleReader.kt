@@ -79,6 +79,10 @@ enum class UnityTextUnavailableReason {
     TOO_MANY_OBJECTS,
     DECODE_FAILED,
     DOCUMENT_CLOSED,
+    FONT_NO_GLYPHS,
+    FONT_STATIC_NO_SOURCE,
+    FONT_ATLAS_FULL,
+    FONT_ASSET_NOT_FOUND,
 }
 
 /** Per-entry text capability, including a diagnostic when editing is unsafe or impossible. */
@@ -221,21 +225,33 @@ class UnityBundleDocument internal constructor(
     }
 
     /** Re-encodes the entry with edited strings applied; returns its new raw bytes. */
-    fun rebuildTexts(entry: UnityBundleEntry, edits: Map<String, String>): ByteArray =
-        withOpenDocument { rebuildTextsOpen(entry, edits) }
+    fun rebuildTexts(
+        entry: UnityBundleEntry,
+        edits: Map<String, String>,
+        transformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
+    ): ByteArray = withOpenDocument { rebuildTextsOpen(entry, edits, transformOptions) }
 
-    private fun rebuildTextsOpen(entry: UnityBundleEntry, edits: Map<String, String>): ByteArray {
+    private fun rebuildTextsOpen(
+        entry: UnityBundleEntry,
+        edits: Map<String, String>,
+        transformOptions: UnityTextTransformOptions,
+    ): ByteArray {
         requireEntry(entry)
+        val effectiveEdits = if (transformOptions.isEnabled) {
+            UnityTextShaper.transformEdits(edits, transformOptions)
+        } else {
+            edits
+        }
         val standalone = serialized
         if (standalone != null) {
             val value = decodeOrThrow(standalone, entry)
-            TypeTreeCodec.applyStrings(value, edits)
+            TypeTreeCodec.applyStrings(value, effectiveEdits)
             return standalone.encode(dataFile, entry, value)
         }
 
         val embedded = embeddedOrThrow(entry)
         val editsByPart = LinkedHashMap<Int, LinkedHashMap<Long, LinkedHashMap<String, String>>>()
-        edits.forEach { (path, text) ->
+        effectiveEdits.forEach { (path, text) ->
             val match = EMBEDDED_PATH.matchEntire(path)
                 ?: throw UnityFormatException("Edited JSON contains an invalid embedded text path: $path")
             val partIndex = match.groupValues[1].toIntOrNull()
@@ -307,6 +323,604 @@ class UnityBundleDocument internal constructor(
             temporaryFiles.forEach { it.delete() }
             rebuiltEntry.delete()
         }
+    }
+
+    /** Estimates disk space and duration required to rewrite this bundle or serialized file. */
+    fun estimateRewrite(): UnityBundleRewriteEstimate =
+        UnityFontInspector.estimateRewrite(source.name, summary.dataSize)
+
+    /**
+     * Read-only font capability inspection, scoped either to a single [entry] or to all serialized
+     * entries in this document. Results are cached by `(path, size, lastModified, scope)`.
+     */
+    fun inspectFonts(entry: UnityBundleEntry? = null): UnityFontReport = try {
+        withOpenDocument { inspectFontsOpen(entry) }
+    } catch (_: UnityDocumentClosedException) {
+        UnityFontReport(
+            inspectedEntries = 0,
+            tmpFontAssets = emptyList(),
+            rawFonts = emptyList(),
+            unavailableReason = UnityTextUnavailableReason.DOCUMENT_CLOSED,
+            summaryStatement = "Unity document is closed",
+        )
+    }
+
+    private fun inspectFontsOpen(entry: UnityBundleEntry?): UnityFontReport {
+        if (entry != null) requireEntry(entry)
+        val canonicalPath = runCatching { source.canonicalPath }.getOrDefault(source.path)
+        val fileLength = source.length()
+        val lastModified = source.lastModified()
+        val scope = entry?.name ?: "*"
+        UnityFontInspector.getCachedReport(canonicalPath, fileLength, lastModified, scope)?.let { return it }
+
+        val standalone = serialized
+        val report = if (standalone != null) {
+            inspectStandaloneFonts(standalone, entry)
+        } else if (summary.signature == "UnityFS") {
+            val targets = if (entry != null) listOf(entry) else summary.entries
+            inspectEmbeddedFonts(targets)
+        } else {
+            UnityFontReport(
+                inspectedEntries = 0,
+                tmpFontAssets = emptyList(),
+                rawFonts = emptyList(),
+                unavailableReason = UnityTextUnavailableReason.NOT_SERIALIZED_FILE,
+                summaryStatement = "Bundle format does not expose serialized font objects",
+            )
+        }
+        UnityFontInspector.putCachedReport(canonicalPath, fileLength, lastModified, scope, report)
+        return report
+    }
+
+    private fun inspectStandaloneFonts(
+        index: SerializedFileIndex,
+        singleEntry: UnityBundleEntry?,
+    ): UnityFontReport {
+        ensureUnityOperationActive()
+        val rawFonts = ArrayList<UnityRawFontReport>()
+        val rawByPartAndId = LinkedHashMap<Pair<Int, Long>, UnityRawFontReport>()
+        var strippedTypeTrees = 0
+
+        // Always scan Font (class 128) slots first so m_SourceFontFile references resolve cleanly.
+        index.slots.forEach { slot ->
+            ensureUnityOperationActive()
+            if (slot.classId == UnityFontInspector.FONT_CLASS_ID) {
+                val tree = index.trees.getOrNull(slot.typeIndex)
+                if (tree == null) {
+                    strippedTypeTrees++
+                    return@forEach
+                }
+                val entryObj = summary.entries.firstOrNull { it.name == slot.entryName } ?: return@forEach
+                val decoded = index.decodeResult(dataFile, entryObj)
+                if (decoded is SerializedDecodeResult.Success && decoded.value is UVal.Struct) {
+                    val raw = UnityFontInspector.inspectRawFont(slot.entryName, 0, slot.pathId, decoded.value)
+                    if (singleEntry == null || singleEntry.name == slot.entryName) rawFonts += raw
+                    rawByPartAndId[0 to slot.pathId] = raw
+                }
+            }
+        }
+
+        val tmpAssets = ArrayList<UnityTmpFontAssetReport>()
+        val targetSlots = if (singleEntry != null) {
+            listOfNotNull(index.slotFor(singleEntry))
+        } else {
+            index.slots
+        }
+        targetSlots.forEach { slot ->
+            ensureUnityOperationActive()
+            if (slot.classId == UnityFontInspector.MONO_BEHAVIOUR_CLASS_ID) {
+                val tree = index.trees.getOrNull(slot.typeIndex)
+                if (tree == null) {
+                    strippedTypeTrees++
+                    return@forEach
+                }
+                if (!UnityFontInspector.hasTmpFontAssetShape(tree.root)) return@forEach
+                val entryObj = summary.entries.firstOrNull { it.name == slot.entryName } ?: return@forEach
+                val decoded = index.decodeResult(dataFile, entryObj)
+                if (decoded is SerializedDecodeResult.Success &&
+                    decoded.value is UVal.Struct &&
+                    UnityFontInspector.isTmpFontAsset(decoded.value)
+                ) {
+                    tmpAssets += UnityFontInspector.inspectTmpFontAsset(
+                        entryName = slot.entryName,
+                        partIndex = 0,
+                        pathId = slot.pathId,
+                        struct = decoded.value,
+                        rawFontsByPartAndId = rawByPartAndId,
+                    )
+                }
+            }
+        }
+
+        val reason = deriveFontUnavailableReason(tmpAssets, rawFonts, strippedTypeTrees)
+        return UnityFontReport(
+            inspectedEntries = if (singleEntry != null) 1 else summary.entries.size,
+            tmpFontAssets = tmpAssets,
+            rawFonts = rawFonts,
+            strippedTypeTreeObjects = strippedTypeTrees,
+            unavailableReason = reason,
+            summaryStatement = UnityFontInspector.buildSummaryStatement(tmpAssets, rawFonts, strippedTypeTrees),
+        )
+    }
+
+    private fun inspectEmbeddedFonts(entries: List<UnityBundleEntry>): UnityFontReport {
+        val rawFonts = ArrayList<UnityRawFontReport>()
+        val tmpAssets = ArrayList<UnityTmpFontAssetReport>()
+        var strippedTypeTrees = 0
+        var serializedEntriesCount = 0
+        var firstParseFailure: EmbeddedParse.Failure? = null
+
+        entries.forEach { bundleEntry ->
+            ensureUnityOperationActive()
+            val parsed = embedded(bundleEntry)
+            if (parsed is EmbeddedParse.Failure) {
+                if (firstParseFailure == null) firstParseFailure = parsed
+                return@forEach
+            }
+            val embeddedSuccess = parsed as EmbeddedParse.Success
+            serializedEntriesCount++
+            val rawByPartAndId = LinkedHashMap<Pair<Int, Long>, UnityRawFontReport>()
+
+            embeddedSuccess.parts.forEach { part ->
+                part.index.slots.forEach { slot ->
+                    ensureUnityOperationActive()
+                    if (slot.classId == UnityFontInspector.FONT_CLASS_ID) {
+                        val tree = part.index.trees.getOrNull(slot.typeIndex)
+                        if (tree == null) {
+                            strippedTypeTrees++
+                            return@forEach
+                        }
+                        val objectEntry = part.summary.entries.firstOrNull { it.name == slot.entryName } ?: return@forEach
+                        val decoded = part.index.decodeResult(dataFile, objectEntry)
+                        if (decoded is SerializedDecodeResult.Success && decoded.value is UVal.Struct) {
+                            val raw = UnityFontInspector.inspectRawFont(
+                                entryName = bundleEntry.name,
+                                partIndex = part.partIndex,
+                                pathId = slot.pathId,
+                                struct = decoded.value,
+                            )
+                            rawFonts += raw
+                            rawByPartAndId[part.partIndex to slot.pathId] = raw
+                        }
+                    }
+                }
+
+                part.index.slots.forEach { slot ->
+                    ensureUnityOperationActive()
+                    if (slot.classId == UnityFontInspector.MONO_BEHAVIOUR_CLASS_ID) {
+                        val tree = part.index.trees.getOrNull(slot.typeIndex)
+                        if (tree == null) {
+                            strippedTypeTrees++
+                            return@forEach
+                        }
+                        if (!UnityFontInspector.hasTmpFontAssetShape(tree.root)) return@forEach
+                        val objectEntry = part.summary.entries.firstOrNull { it.name == slot.entryName } ?: return@forEach
+                        val decoded = part.index.decodeResult(dataFile, objectEntry)
+                        if (decoded is SerializedDecodeResult.Success &&
+                            decoded.value is UVal.Struct &&
+                            UnityFontInspector.isTmpFontAsset(decoded.value)
+                        ) {
+                            tmpAssets += UnityFontInspector.inspectTmpFontAsset(
+                                entryName = bundleEntry.name,
+                                partIndex = part.partIndex,
+                                pathId = slot.pathId,
+                                struct = decoded.value,
+                                rawFontsByPartAndId = rawByPartAndId,
+                            )
+                        }
+                    }
+                }
+            }
+        }
+
+        if (serializedEntriesCount == 0 && firstParseFailure != null) {
+            return UnityFontReport(
+                inspectedEntries = 0,
+                tmpFontAssets = emptyList(),
+                rawFonts = emptyList(),
+                unavailableReason = firstParseFailure!!.reason,
+                summaryStatement = firstParseFailure!!.diagnostic,
+            )
+        }
+
+        val reason = deriveFontUnavailableReason(tmpAssets, rawFonts, strippedTypeTrees)
+        return UnityFontReport(
+            inspectedEntries = serializedEntriesCount,
+            tmpFontAssets = tmpAssets,
+            rawFonts = rawFonts,
+            strippedTypeTreeObjects = strippedTypeTrees,
+            unavailableReason = reason,
+            summaryStatement = UnityFontInspector.buildSummaryStatement(tmpAssets, rawFonts, strippedTypeTrees),
+        )
+    }
+
+    private fun deriveFontUnavailableReason(
+        tmpAssets: List<UnityTmpFontAssetReport>,
+        rawFonts: List<UnityRawFontReport>,
+        strippedTypeTrees: Int,
+    ): UnityTextUnavailableReason? {
+        if (tmpAssets.isEmpty() && rawFonts.isEmpty()) {
+            return if (strippedTypeTrees > 0) {
+                UnityTextUnavailableReason.NO_TYPE_INFORMATION
+            } else {
+                UnityTextUnavailableReason.FONT_ASSET_NOT_FOUND
+            }
+        }
+        if (tmpAssets.any { it.canRenderPersian }) return null
+        tmpAssets.firstNotNullOfOrNull { it.statusReason }?.let { return it }
+        if (tmpAssets.isEmpty() && rawFonts.none { it.supportsArabicCmap }) {
+            return UnityTextUnavailableReason.FONT_NO_GLYPHS
+        }
+        return null
+    }
+
+    /**
+     * Option A: Switches `TMP_FontAsset` object(s) in [entry] to `m_AtlasPopulationMode = 1`
+     * (Dynamic) and binds `m_SourceFontFile` to a same-file `Font` (`classId = 128`), optionally
+     * replacing that `Font`'s `m_FontData` with [ttfBytes].
+     */
+    fun patchFontForDynamicGeneration(
+        entry: UnityBundleEntry,
+        ttfBytes: ByteArray? = null,
+        targetTmpPathId: Long? = null,
+        targetFontPathId: Long? = null,
+    ): UnityFontPatchResult = try {
+        withOpenDocument {
+            patchFontForDynamicGenerationOpen(entry, ttfBytes, targetTmpPathId, targetFontPathId)
+        }
+    } catch (_: UnityDocumentClosedException) {
+        UnityFontPatchResult.Unavailable(
+            UnityTextUnavailableReason.DOCUMENT_CLOSED,
+            "Unity document is closed",
+        )
+    }
+
+    private fun patchFontForDynamicGenerationOpen(
+        entry: UnityBundleEntry,
+        ttfBytes: ByteArray?,
+        targetTmpPathId: Long?,
+        targetFontPathId: Long?,
+    ): UnityFontPatchResult {
+        requireEntry(entry)
+        if (ttfBytes != null) {
+            if (!TtfCmapInspector.isValidFontHeader(ttfBytes)) {
+                return UnityFontPatchResult.Unavailable(
+                    UnityTextUnavailableReason.DECODE_FAILED,
+                    "Supplied font file is not a valid TrueType/OpenType (sfnt) font",
+                )
+            }
+            if (!TtfCmapInspector.supportsArabicScript(ttfBytes)) {
+                return UnityFontPatchResult.Unavailable(
+                    UnityTextUnavailableReason.FONT_NO_GLYPHS,
+                    "Supplied font file does not contain Arabic/Persian codepoints in its cmap table",
+                )
+            }
+        }
+
+        val standalone = serialized
+        if (standalone != null) {
+            return patchStandaloneFont(standalone, entry, ttfBytes, targetTmpPathId, targetFontPathId)
+        }
+        val embedded = when (val parsed = embedded(entry)) {
+            is EmbeddedParse.Failure -> return UnityFontPatchResult.Unavailable(parsed.reason, parsed.diagnostic)
+            is EmbeddedParse.Success -> parsed
+        }
+        return patchEmbeddedFont(entry, embedded, ttfBytes, targetTmpPathId, targetFontPathId)
+    }
+
+    private fun patchStandaloneFont(
+        index: SerializedFileIndex,
+        selectedEntry: UnityBundleEntry,
+        ttfBytes: ByteArray?,
+        targetTmpPathId: Long?,
+        targetFontPathId: Long?,
+    ): UnityFontPatchResult {
+        val scratch = dataFile.parentFile ?: throw IOException("Unity cache directory is missing")
+        val replacements = LinkedHashMap<String, File>()
+        val tempFiles = ArrayList<File>()
+        try {
+            val partResult = buildPartFontReplacements(
+                partIndex = 0,
+                index = index,
+                entries = summary.entries,
+                scratch = scratch,
+                ttfBytes = ttfBytes,
+                targetTmpPathId = targetTmpPathId ?: index.slotFor(selectedEntry)?.takeIf {
+                    it.classId == UnityFontInspector.MONO_BEHAVIOUR_CLASS_ID
+                }?.pathId,
+                targetFontPathId = targetFontPathId,
+                tempFiles = tempFiles,
+            )
+            when (partResult) {
+                is PartFontPatchOutcome.Unavailable -> return UnityFontPatchResult.Unavailable(partResult.reason, partResult.diagnostic)
+                is PartFontPatchOutcome.Patched -> replacements.putAll(partResult.replacements)
+            }
+
+            val rebuiltFile = File(scratch, ".standalone-font-${System.nanoTime()}.assets")
+            tempFiles += rebuiltFile
+            index.rebuild(rebuiltFile, dataFile, replacements, summary.entries)
+            val verifyData = File(scratch, ".standalone-verify-${System.nanoTime()}.data")
+            tempFiles += verifyData
+            val (rebuiltSummary, rebuiltIndex) = SerializedFileReader.parse(rebuiltFile, verifyData)
+            val updatedDoc = UnityBundleDocument(rebuiltFile, rebuiltSummary, verifyData, rebuiltIndex)
+            val updatedReport = updatedDoc.inspectFonts()
+            UnityFontInspector.clearCache()
+            return UnityFontPatchResult.Success(
+                rebuiltEntryBytes = rebuiltFile.readBytes(),
+                patchedTmpAssets = partResult.patchedTmpCount,
+                boundFontPathId = partResult.boundFontPathId,
+                updatedReport = updatedReport,
+            )
+        } finally {
+            tempFiles.forEach { it.delete() }
+        }
+    }
+
+    private fun patchEmbeddedFont(
+        entry: UnityBundleEntry,
+        embedded: EmbeddedParse.Success,
+        ttfBytes: ByteArray?,
+        targetTmpPathId: Long?,
+        targetFontPathId: Long?,
+    ): UnityFontPatchResult {
+        val scratch = dataFile.parentFile ?: throw IOException("Unity cache directory is missing")
+        val rebuiltEntry = File(scratch, ".font-entry-${System.nanoTime()}.bin")
+        val tempFiles = ArrayList<File>()
+        var totalPatchedTmp = 0
+        var chosenFontPathId = 0L
+        var lastUnavailable: PartFontPatchOutcome.Unavailable? = null
+
+        try {
+            RandomAccessFile(dataFile, "r").use { sourceData ->
+                FileOutputStream(rebuiltEntry).buffered(BUFFER_SIZE).use { combinedOut ->
+                    var sourceCursor = 0L
+                    embedded.parts.forEach { part ->
+                        if (part.relativeOffset < sourceCursor) {
+                            throw UnityFormatException("Embedded serialized-file ranges overlap")
+                        }
+                        val gap = part.relativeOffset - sourceCursor
+                        if (gap > 0) {
+                            sourceData.seek(entry.offset + sourceCursor)
+                            copyExactly(sourceData, combinedOut, gap)
+                        }
+                        val outcome = buildPartFontReplacements(
+                            partIndex = part.partIndex,
+                            index = part.index,
+                            entries = part.summary.entries,
+                            scratch = scratch,
+                            ttfBytes = ttfBytes,
+                            targetTmpPathId = targetTmpPathId,
+                            targetFontPathId = targetFontPathId,
+                            tempFiles = tempFiles,
+                        )
+                        when (outcome) {
+                            is PartFontPatchOutcome.Unavailable -> {
+                                lastUnavailable = outcome
+                                sourceData.seek(entry.offset + part.relativeOffset)
+                                copyExactly(sourceData, combinedOut, part.declaredSize)
+                            }
+                            is PartFontPatchOutcome.Patched -> {
+                                totalPatchedTmp += outcome.patchedTmpCount
+                                chosenFontPathId = outcome.boundFontPathId
+                                val rebuiltPart = File(scratch, ".font-part-${part.partIndex}-${System.nanoTime()}.assets")
+                                tempFiles += rebuiltPart
+                                part.index.rebuild(rebuiltPart, dataFile, outcome.replacements, part.summary.entries)
+                                rebuiltPart.inputStream().buffered(BUFFER_SIZE).use { it.copyTo(combinedOut, BUFFER_SIZE) }
+                            }
+                        }
+                        sourceCursor = checkedAdd(part.relativeOffset, part.declaredSize, "Embedded serialized-file range overflows")
+                    }
+                    if (sourceCursor < entry.size) {
+                        sourceData.seek(entry.offset + sourceCursor)
+                        copyExactly(sourceData, combinedOut, entry.size - sourceCursor)
+                    }
+                }
+            }
+
+            if (totalPatchedTmp == 0) {
+                val unavail = lastUnavailable
+                return UnityFontPatchResult.Unavailable(
+                    unavail?.reason ?: UnityTextUnavailableReason.FONT_ASSET_NOT_FOUND,
+                    unavail?.diagnostic ?: "No compatible TMP_FontAsset could be patched in ${entry.name}",
+                )
+            }
+            if (rebuiltEntry.length() > MAX_REBUILD_BYTES || rebuiltEntry.length() > Int.MAX_VALUE) {
+                throw UnityFormatException("Rebuilt serialized entry is too large")
+            }
+
+            // Re-parse the rebuilt embedded entry to verify all structural invariants and build the updated report.
+            val verifyParsed = SerializedFileReader.parseEmbedded(rebuiltEntry, 0L, rebuiltEntry.length())
+            val verifyDoc = UnityBundleDocument(rebuiltEntry, verifyParsed.first, rebuiltEntry, verifyParsed.second)
+            val updatedReport = verifyDoc.inspectFonts()
+            UnityFontInspector.clearCache()
+            return UnityFontPatchResult.Success(
+                rebuiltEntryBytes = rebuiltEntry.readBytes(),
+                patchedTmpAssets = totalPatchedTmp,
+                boundFontPathId = chosenFontPathId,
+                updatedReport = updatedReport,
+            )
+        } finally {
+            tempFiles.forEach { it.delete() }
+            rebuiltEntry.delete()
+        }
+    }
+
+    private sealed class PartFontPatchOutcome {
+        data class Patched(
+            val replacements: Map<String, File>,
+            val patchedTmpCount: Int,
+            val boundFontPathId: Long,
+        ) : PartFontPatchOutcome()
+
+        data class Unavailable(
+            val reason: UnityTextUnavailableReason,
+            val diagnostic: String,
+        ) : PartFontPatchOutcome()
+    }
+
+    private fun buildPartFontReplacements(
+        partIndex: Int,
+        index: SerializedFileIndex,
+        entries: List<UnityBundleEntry>,
+        scratch: File,
+        ttfBytes: ByteArray?,
+        targetTmpPathId: Long?,
+        targetFontPathId: Long?,
+        tempFiles: MutableList<File>,
+    ): PartFontPatchOutcome {
+        val entriesByName = entries.associateBy { it.name }
+        val fontSlots = index.slots.filter { it.classId == UnityFontInspector.FONT_CLASS_ID }
+        val tmpCandidates = index.slots.filter { slot ->
+            slot.classId == UnityFontInspector.MONO_BEHAVIOUR_CLASS_ID &&
+                (targetTmpPathId == null || slot.pathId == targetTmpPathId)
+        }
+
+        val decodedTmps = ArrayList<Pair<SerializedFileIndex.Slot, UVal.Struct>>()
+        var missingTypeTree = false
+        tmpCandidates.forEach { slot ->
+            val tree = index.trees.getOrNull(slot.typeIndex)
+            if (tree == null) {
+                missingTypeTree = true
+                return@forEach
+            }
+            if (!UnityFontInspector.hasTmpFontAssetShape(tree.root)) return@forEach
+            val objEntry = entriesByName[slot.entryName] ?: return@forEach
+            val decoded = index.decodeResult(dataFile, objEntry)
+            if (decoded is SerializedDecodeResult.Success &&
+                decoded.value is UVal.Struct &&
+                UnityFontInspector.isTmpFontAsset(decoded.value)
+            ) {
+                decodedTmps += slot to decoded.value
+            }
+        }
+
+        if (decodedTmps.isEmpty()) {
+            return if (missingTypeTree) {
+                PartFontPatchOutcome.Unavailable(
+                    UnityTextUnavailableReason.NO_TYPE_INFORMATION,
+                    "MonoBehaviour objects in part $partIndex have no type trees",
+                )
+            } else {
+                PartFontPatchOutcome.Unavailable(
+                    UnityTextUnavailableReason.FONT_ASSET_NOT_FOUND,
+                    "No TMP_FontAsset MonoBehaviour found in part $partIndex",
+                )
+            }
+        }
+
+        val chosenFontSlot = when {
+            targetFontPathId != null -> fontSlots.firstOrNull { it.pathId == targetFontPathId }
+            else -> {
+                val existingReferencedId = decodedTmps.firstNotNullOfOrNull { (_, struct) ->
+                    val pptr = struct.fields["m_SourceFontFile"] as? UVal.Struct
+                    val fileId = (pptr?.fields?.get("m_FileID") as? UVal.Num)?.value?.toInt() ?: 0
+                    val pathId = (pptr?.fields?.get("m_PathID") as? UVal.Num)?.value ?: 0L
+                    pathId.takeIf { fileId == 0 && it != 0L }
+                }
+                if (existingReferencedId != null) {
+                    fontSlots.firstOrNull { it.pathId == existingReferencedId } ?: fontSlots.firstOrNull()
+                } else {
+                    fontSlots.firstOrNull()
+                }
+            }
+        }
+
+        val replacements = LinkedHashMap<String, File>()
+
+        if (chosenFontSlot != null) {
+            val fontTree = index.trees.getOrNull(chosenFontSlot.typeIndex)
+                ?: return PartFontPatchOutcome.Unavailable(
+                    UnityTextUnavailableReason.NO_TYPE_INFORMATION,
+                    "Font #${chosenFontSlot.pathId} has no type tree",
+                )
+            val fontEntry = entriesByName[chosenFontSlot.entryName]
+                ?: return PartFontPatchOutcome.Unavailable(
+                    UnityTextUnavailableReason.DECODE_FAILED,
+                    "Font slot #${chosenFontSlot.pathId} is missing from entry table",
+                )
+            val decodedFont = index.decodeResult(dataFile, fontEntry)
+            val fontStruct = (decodedFont as? SerializedDecodeResult.Success)?.value as? UVal.Struct
+                ?: return PartFontPatchOutcome.Unavailable(
+                    UnityTextUnavailableReason.DECODE_FAILED,
+                    "Could not decode Font #${chosenFontSlot.pathId}",
+                )
+            if (ttfBytes != null) {
+                UnityFontInspector.replaceRawFontData(fontStruct, ttfBytes)
+                val encodedFont = index.encode(dataFile, fontEntry, fontStruct)
+                val fontFile = File(scratch, ".font-obj-$partIndex-${chosenFontSlot.pathId}-${System.nanoTime()}.bin")
+                fontFile.writeBytes(encodedFont)
+                tempFiles += fontFile
+                replacements[chosenFontSlot.entryName] = fontFile
+            } else {
+                val existingBytes = UnityFontInspector.extractFontDataBytes(fontStruct)
+                if (!TtfCmapInspector.supportsArabicScript(existingBytes)) {
+                    return PartFontPatchOutcome.Unavailable(
+                        UnityTextUnavailableReason.FONT_NO_GLYPHS,
+                        "In-bundle Font #${chosenFontSlot.pathId} does not contain Arabic/Persian glyphs; supply a TTF font",
+                    )
+                }
+            }
+
+            decodedTmps.forEach { (tmpSlot, tmpStruct) ->
+                val tmpEntry = entriesByName.getValue(tmpSlot.entryName)
+                UnityFontInspector.applyDynamicFontBinding(
+                    tmpStruct = tmpStruct,
+                    sourceFileId = 0,
+                    sourcePathId = chosenFontSlot.pathId,
+                    sameFileSlots = index.slots,
+                )
+                val encodedTmp = index.encode(dataFile, tmpEntry, tmpStruct)
+                val tmpFile = File(scratch, ".tmp-obj-$partIndex-${tmpSlot.pathId}-${System.nanoTime()}.bin")
+                tmpFile.writeBytes(encodedTmp)
+                tempFiles += tmpFile
+                replacements[tmpSlot.entryName] = tmpFile
+            }
+
+            return PartFontPatchOutcome.Patched(
+                replacements = replacements,
+                patchedTmpCount = decodedTmps.size,
+                boundFontPathId = chosenFontSlot.pathId,
+            )
+        }
+
+        // No same-file Font (classId = 128) slot exists.
+        // If ttfBytes == null and the TMP_FontAsset already references an external m_SourceFontFile
+        // (m_FileID != 0 && m_PathID != 0), we can still switch m_AtlasPopulationMode from 0 to 1.
+        if (ttfBytes == null) {
+            var externalPathId = 0L
+            decodedTmps.forEach { (tmpSlot, tmpStruct) ->
+                val pptr = tmpStruct.fields["m_SourceFontFile"] as? UVal.Struct
+                val fileId = (pptr?.fields?.get("m_FileID") as? UVal.Num)?.value?.toInt() ?: 0
+                val pathId = (pptr?.fields?.get("m_PathID") as? UVal.Num)?.value ?: 0L
+                if (fileId != 0 && pathId != 0L) {
+                    val tmpEntry = entriesByName.getValue(tmpSlot.entryName)
+                    UnityFontInspector.applyDynamicFontBinding(
+                        tmpStruct = tmpStruct,
+                        sourceFileId = fileId,
+                        sourcePathId = pathId,
+                        sameFileSlots = index.slots,
+                    )
+                    val encodedTmp = index.encode(dataFile, tmpEntry, tmpStruct)
+                    val tmpFile = File(scratch, ".tmp-ext-$partIndex-${tmpSlot.pathId}-${System.nanoTime()}.bin")
+                    tmpFile.writeBytes(encodedTmp)
+                    tempFiles += tmpFile
+                    replacements[tmpSlot.entryName] = tmpFile
+                    externalPathId = pathId
+                }
+            }
+            if (replacements.isNotEmpty()) {
+                return PartFontPatchOutcome.Patched(
+                    replacements = replacements,
+                    patchedTmpCount = replacements.size,
+                    boundFontPathId = externalPathId,
+                )
+            }
+        }
+
+        return PartFontPatchOutcome.Unavailable(
+            UnityTextUnavailableReason.FONT_STATIC_NO_SOURCE,
+            "Serialized file has no Font (classID 128) object slot and SerializedFileIndex cannot insert new object-table rows",
+        )
     }
 
     private fun inspectObject(index: SerializedFileIndex, entry: UnityBundleEntry): UnityTextInspection {

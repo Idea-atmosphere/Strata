@@ -52,4 +52,16 @@
     <string name="unity_operation_cancelled">Operation cancelled.</string>
     <string name="unity_unsupported_version">This Unity file version is not supported.</string>
     <string name="unity_staging_unavailable">The staged Unity data is no longer available; reopen the file.</string>
+    <string name="unity_text_font_no_glyphs">Font asset has no glyphs for the target script.</string>
+    <string name="unity_text_font_static_no_source">Static TMP font has 0 Arabic/Persian glyphs and no source TTF.</string>
+    <string name="unity_text_font_atlas_full">Font atlas texture has no remaining space for new glyphs.</string>
+    <string name="unity_text_font_not_found">No compatible Font or TMP_FontAsset found in this entry.</string>
+    <string name="unity_inspect_fonts">Inspect fonts</string>
+    <string name="unity_font_report_title">Font capability (%1$d TMP, %2$d Font)</string>
+    <string name="unity_shape_arabic">Persian/Arabic contextual shaping</string>
+    <string name="unity_reverse_bidi">Visual RTL bidi reordering</string>
+    <string name="unity_font_enable_dynamic">Bind dynamic TTF font…</string>
+    <string name="unity_font_rewrite_warning_title">Rewrite bundle for font update?</string>
+    <string name="unity_font_rewrite_warning_body">Patching fonts in %1$s requires restreaming and LZ4-compressing %2$s of temporary data (estimated %3$d–%4$d s).</string>
+    <string name="unity_font_patch_done">Patched %1$d TMP font asset(s) to Dynamic mode. Rebuild the bundle to save.</string>
 </resources>

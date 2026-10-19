@@ -51,4 +51,16 @@
     <string name="unity_operation_cancelled">操作已取消。</string>
     <string name="unity_unsupported_version">不支持此 Unity 文件版本。</string>
     <string name="unity_staging_unavailable">暂存的 Unity 数据已不可用；请重新打开文件。</string>
+    <string name="unity_text_font_no_glyphs">字体资源缺少目标文字的字形。</string>
+    <string name="unity_text_font_static_no_source">静态 TMP 字体不包含阿拉伯/波斯字形且未附加源 TTF。</string>
+    <string name="unity_text_font_atlas_full">字体图集纹理已满，无法容纳新字形。</string>
+    <string name="unity_text_font_not_found">此条目中未找到兼容的 Font 或 TMP_FontAsset。</string>
+    <string name="unity_inspect_fonts">检查字体</string>
+    <string name="unity_font_report_title">字体能力（%1$d 个 TMP，%2$d 个 Font）</string>
+    <string name="unity_shape_arabic">波斯语/阿拉伯语上下文连字整形</string>
+    <string name="unity_reverse_bidi">视觉 RTL 双向重排 (Bidi)</string>
+    <string name="unity_font_enable_dynamic">绑定动态 TTF 字体…</string>
+    <string name="unity_font_rewrite_warning_title">重写资源包以更新字体？</string>
+    <string name="unity_font_rewrite_warning_body">修补 %1$s 中的字体需要重新流式写入并 LZ4 压缩 %2$s 临时数据（预计 %3$d–%4$d 秒）。</string>
+    <string name="unity_font_patch_done">已将 %1$d 个 TMP 字体资源切换为动态模式。请重建资源包以保存。</string>
 </resources>

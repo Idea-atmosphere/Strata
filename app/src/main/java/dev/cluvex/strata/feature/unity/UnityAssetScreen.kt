@@ -21,6 +21,7 @@ import androidx.compose.material.icons.automirrored.rounded.ArrowBack
 import androidx.compose.material.icons.rounded.FolderOpen
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
+import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
@@ -54,9 +55,12 @@ import dev.cluvex.strata.core.archive.ArchiveParent
 import dev.cluvex.strata.core.model.FileItem
 import dev.cluvex.strata.core.unity.UnityBundleDocument
 import dev.cluvex.strata.core.unity.UnityBundleEntry
+import dev.cluvex.strata.core.unity.UnityBundleRewriteEstimate
 import dev.cluvex.strata.core.unity.UnityFileKind
+import dev.cluvex.strata.core.unity.UnityFontReport
 import dev.cluvex.strata.core.unity.UnityProbe
 import dev.cluvex.strata.core.unity.UnityTextInfo
+import dev.cluvex.strata.core.unity.UnityTextTransformOptions
 import dev.cluvex.strata.core.unity.UnityTextUnavailableReason
 import dev.cluvex.strata.core.util.Formatters
 import dev.cluvex.strata.ui.isolated
@@ -84,6 +88,7 @@ fun UnityAssetScreen(
     val state by vm.state.collectAsStateWithLifecycle()
     var localBusy by remember(path) { mutableStateOf(false) }
     var signPrompt by remember(path) { mutableStateOf(false) }
+    var fontRewritePrompt by remember(path) { mutableStateOf<UnityBundleRewriteEstimate?>(null) }
 
     LaunchedEffect(path, refreshToken) {
         vm.open(path)
@@ -146,6 +151,13 @@ fun UnityAssetScreen(
                     localBusy = false
                 }
             }
+        }
+    }
+
+    val fontTtfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val entry = selectedEntry
+        if (uri != null && entry != null) {
+            vm.applyDynamicFont(entry, uri, context.contentResolver)
         }
     }
 
@@ -233,6 +245,19 @@ fun UnityAssetScreen(
                             } else {
                                 null
                             },
+                            onInspectFonts = { vm.inspectFonts(entry) },
+                            onBindDynamicFont = {
+                                val estimate = vm.estimateRewrite()
+                                if (estimate != null) {
+                                    fontRewritePrompt = estimate
+                                } else {
+                                    fontTtfPicker.launch(arrayOf("*/*"))
+                                }
+                            },
+                            fontReport = state.fontReports[entry.name],
+                            textTransformOptions = state.textTransformOptions,
+                            onToggleShapeArabic = vm::setShapeArabic,
+                            onToggleReverseBidi = vm::setReverseBidi,
                             textIssue = state.textIssues[entry.name],
                         )
                     } ?: Text(stringResource(R.string.unity_select_entry), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
@@ -284,6 +309,35 @@ fun UnityAssetScreen(
                 }) { Text(stringResource(R.string.common_sign_apk)) }
             },
             dismissButton = { TextButton(onClick = { signPrompt = false }) { Text(stringResource(R.string.common_cancel)) } },
+        )
+    }
+
+    fontRewritePrompt?.let { estimate ->
+        AlertDialog(
+            onDismissRequest = { fontRewritePrompt = null },
+            title = { Text(stringResource(R.string.unity_font_rewrite_warning_title)) },
+            text = {
+                Text(
+                    stringResource(
+                        R.string.unity_font_rewrite_warning_body,
+                        isolated(estimate.bundleName),
+                        Formatters.size(estimate.temporaryDiskBytes),
+                        estimate.estimatedMinSeconds,
+                        estimate.estimatedMaxSeconds,
+                    ),
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    fontRewritePrompt = null
+                    fontTtfPicker.launch(arrayOf("*/*"))
+                }) { Text(stringResource(R.string.unity_font_enable_dynamic)) }
+            },
+            dismissButton = {
+                TextButton(onClick = { fontRewritePrompt = null }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            },
         )
     }
 }
@@ -356,6 +410,12 @@ private fun UnityEntryActions(
     onExport: () -> Unit,
     onReplace: () -> Unit,
     onExportTexts: (() -> Unit)? = null,
+    onInspectFonts: (() -> Unit)? = null,
+    onBindDynamicFont: (() -> Unit)? = null,
+    fontReport: UnityFontReport? = null,
+    textTransformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
+    onToggleShapeArabic: ((Boolean) -> Unit)? = null,
+    onToggleReverseBidi: ((Boolean) -> Unit)? = null,
     textIssue: UnityTextUnavailableReason? = null,
 ) {
     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
@@ -371,12 +431,76 @@ private fun UnityEntryActions(
                     modifier = Modifier.padding(top = 4.dp),
                 )
             }
+            if (fontReport != null) {
+                Text(
+                    stringResource(
+                        R.string.unity_font_report_title,
+                        fontReport.tmpFontAssets.size,
+                        fontReport.rawFonts.size,
+                    ),
+                    style = MaterialTheme.typography.labelMedium,
+                    color = MaterialTheme.colorScheme.primary,
+                    modifier = Modifier.padding(top = 6.dp),
+                )
+                fontReport.tmpFontAssets.forEach { tmp ->
+                    Text(
+                        isolated(tmp.capabilityStatement),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.padding(top = 2.dp),
+                    )
+                }
+            }
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                 TextButton(onClick = onOpen, enabled = !busy, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.unity_open_entry), maxLines = 1) }
                 TextButton(onClick = onExport, enabled = !busy, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.unity_export_entry), maxLines = 1) }
                 TextButton(onClick = onReplace, enabled = !busy, modifier = Modifier.weight(1f)) { Text(stringResource(R.string.unity_replace_entry), maxLines = 1) }
             }
+            if (onInspectFonts != null) {
+                Row(Modifier.fillMaxWidth().padding(top = 4.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                    OutlinedButton(onClick = onInspectFonts, enabled = !busy, modifier = Modifier.weight(1f)) {
+                        Text(stringResource(R.string.unity_inspect_fonts), maxLines = 1)
+                    }
+                    if (onBindDynamicFont != null && fontReport != null && fontReport.tmpFontAssets.isNotEmpty()) {
+                        OutlinedButton(onClick = onBindDynamicFont, enabled = !busy, modifier = Modifier.weight(1f)) {
+                            Text(stringResource(R.string.unity_font_enable_dynamic), maxLines = 1)
+                        }
+                    }
+                }
+            }
             if (onExportTexts != null) {
+                if (onToggleShapeArabic != null && onToggleReverseBidi != null) {
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 4.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = textTransformOptions.shapeArabic,
+                            onCheckedChange = onToggleShapeArabic,
+                            enabled = !busy,
+                        )
+                        Text(
+                            stringResource(R.string.unity_shape_arabic),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = textTransformOptions.reverseBidi,
+                            onCheckedChange = onToggleReverseBidi,
+                            enabled = !busy,
+                        )
+                        Text(
+                            stringResource(R.string.unity_reverse_bidi),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
+                }
                 Button(onClick = onExportTexts, enabled = !busy, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
                     Text(stringResource(R.string.unity_export_texts), maxLines = 1)
                 }
@@ -395,6 +519,10 @@ private fun unityTextIssueLabel(reason: UnityTextUnavailableReason): String = wh
     UnityTextUnavailableReason.TOO_MANY_OBJECTS -> stringResource(R.string.unity_text_too_many_objects)
     UnityTextUnavailableReason.DECODE_FAILED -> stringResource(R.string.unity_text_decode_failed)
     UnityTextUnavailableReason.DOCUMENT_CLOSED -> stringResource(R.string.unity_text_document_closed)
+    UnityTextUnavailableReason.FONT_NO_GLYPHS -> stringResource(R.string.unity_text_font_no_glyphs)
+    UnityTextUnavailableReason.FONT_STATIC_NO_SOURCE -> stringResource(R.string.unity_text_font_static_no_source)
+    UnityTextUnavailableReason.FONT_ATLAS_FULL -> stringResource(R.string.unity_text_font_atlas_full)
+    UnityTextUnavailableReason.FONT_ASSET_NOT_FOUND -> stringResource(R.string.unity_text_font_not_found)
 }
 
 @Composable
