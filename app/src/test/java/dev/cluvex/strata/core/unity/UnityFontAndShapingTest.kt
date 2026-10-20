@@ -188,6 +188,67 @@ class UnityFontAndShapingTest {
     }
 
     @Test
+    fun dynamicFontCoverageUsesExactLinkedSourceCmapInsteadOfScriptGuess() {
+        val cmap = TtfCmapInspector.coverage(
+            buildMinimalTtfWithCmap(listOf(0x0020..0x007E, 0x0698..0x0698)),
+        )
+        assertThat(cmap).isNotNull()
+        assertThat(0x0698 in cmap!!).isTrue()
+        assertThat(0x0628 in cmap).isFalse()
+
+        val raw = UnityRawFontReport(
+            entryName = "entry",
+            partIndex = 0,
+            pathId = 22L,
+            name = "Source",
+            embeddedFontBytes = 128,
+            fontFormat = "TrueType",
+            supportsArabicCmap = true,
+            characterRectCount = 0,
+            cmapCoverage = cmap,
+        )
+        val tmp = UnityTmpFontAssetReport(
+            entryName = "entry",
+            partIndex = 0,
+            pathId = 11L,
+            name = "Dynamic",
+            glyphCount = 0,
+            characterCount = 0,
+            populationModeRaw = 1,
+            populationMode = UnityFontPopulationMode.DYNAMIC,
+            sourceFontFileId = 0,
+            sourceFontPathId = raw.pathId,
+            resolvedSourceFontName = raw.name,
+            sourceFontSupportsArabic = true,
+            atlasTextureCount = 1,
+            atlasWidth = 64,
+            atlasHeight = 64,
+            coverage = UnicodeBlockCoverage(),
+            codepoints = emptySet(),
+            statusReason = null,
+            capabilityStatement = "fixture",
+        )
+        val report = UnityFontReport(
+            inspectedEntries = 1,
+            tmpFontAssets = listOf(tmp),
+            rawFonts = listOf(raw),
+            summaryStatement = "fixture",
+        )
+        assertThat(report.missingCodepointsFor("Aژب")).containsExactly(0x0628)
+    }
+
+    @Test
+    fun malformedCmapProducesATypedFailureInsteadOfSilentMissingCoverage() {
+        val malformed = buildMinimalTtfWithCmap(listOf(0x0020..0x007E))
+        ByteBuffer.wrap(malformed).order(ByteOrder.BIG_ENDIAN).putInt(24, Int.MAX_VALUE)
+
+        val error = assertThrows(UnityFormatException::class.java) {
+            TtfCmapInspector.coverage(malformed)
+        }
+        assertThat(error).hasMessageThat().contains("cmap")
+    }
+
+    @Test
     fun patchesStaticTmpFontToDynamicWithEmbeddedArabicTtfAndVerifiesRoundTrip() {
         val arabicTtf = buildMinimalTtfWithCmap(
             ranges = listOf(0x0020..0x007E, 0x0600..0x06FF, 0xFB50..0xFDFF, 0xFE70..0xFEFF),

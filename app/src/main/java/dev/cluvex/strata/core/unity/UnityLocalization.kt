@@ -163,8 +163,12 @@ data class LocalizationAddLanguagePlan(
     val estimatedDataDeltaBytes: Long,
     val reason: UnityTextUnavailableReason? = null,
     val diagnostic: String? = null,
+    val rtlFlagInference: UnityRtlFlagInference? = null,
 ) {
-    val canApply: Boolean get() = updated != null && reason == null
+    val canApply: Boolean
+        get() = updated != null &&
+            reason == null &&
+            (rtlFlagInference == null || rtlFlagInference.status == UnityRtlInferenceStatus.DETERMINED)
 }
 
 object UnityLocalizationOperations {

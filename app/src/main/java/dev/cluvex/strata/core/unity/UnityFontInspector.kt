@@ -71,6 +71,32 @@ data class UnityTmpFontAssetReport(
             )
 }
 
+data class TtfCodepointCoverage(val ranges: List<IntRange>) {
+    init {
+        require(ranges.all { it.first >= 0 && it.last >= it.first && it.last <= Character.MAX_CODE_POINT }) {
+            "TTF cmap range exceeds Unicode"
+        }
+        require(ranges.zipWithNext().all { (left, right) -> left.last + 1 < right.first }) {
+            "TTF cmap ranges must be sorted, merged, and non-overlapping"
+        }
+    }
+
+    operator fun contains(codepoint: Int): Boolean {
+        var low = 0
+        var high = ranges.lastIndex
+        while (low <= high) {
+            val middle = (low + high).ushr(1)
+            val range = ranges[middle]
+            when {
+                codepoint < range.first -> high = middle - 1
+                codepoint > range.last -> low = middle + 1
+                else -> return true
+            }
+        }
+        return false
+    }
+}
+
 data class UnityRawFontReport(
     val entryName: String,
     val partIndex: Int,
@@ -80,6 +106,7 @@ data class UnityRawFontReport(
     val fontFormat: String?,
     val supportsArabicCmap: Boolean,
     val characterRectCount: Int,
+    val cmapCoverage: TtfCodepointCoverage? = null,
 )
 
 data class UnityFontReport(
@@ -94,22 +121,29 @@ data class UnityFontReport(
         get() = tmpFontAssets.any { it.canRenderPersian } ||
             (tmpFontAssets.isEmpty() && rawFonts.any { it.supportsArabicCmap })
 
-    /**
-     * Returns all non-whitespace codepoints from [text] that are missing across every static
-     * `TMP_FontAsset` when no dynamic Arabic-capable `TMP_FontAsset` is present.
-     */
+    /** Exact coverage from TMP tables plus locally linked dynamic source-font cmap ranges. */
     fun missingCodepointsFor(text: String): Set<Int> {
-        if (tmpFontAssets.any { it.populationMode == UnityFontPopulationMode.DYNAMIC && it.sourceFontSupportsArabic }) {
-            return emptySet()
-        }
         val available = HashSet<Int>()
         tmpFontAssets.forEach { available.addAll(it.codepoints) }
+        val rawByIdentity = rawFonts.associateBy { it.partIndex to it.pathId }
+        val dynamicSourceCoverages = tmpFontAssets.asSequence()
+            .filter {
+                it.populationMode == UnityFontPopulationMode.DYNAMIC &&
+                    it.sourceFontFileId == 0 &&
+                    it.sourceFontPathId != 0L
+            }
+            .mapNotNull { rawByIdentity[it.partIndex to it.sourceFontPathId]?.cmapCoverage }
+            .toList()
         val missing = LinkedHashSet<Int>()
         var i = 0
         while (i < text.length) {
             val cp = Character.codePointAt(text, i)
             i += Character.charCount(cp)
-            if (!Character.isWhitespace(cp) && cp !in available) {
+            if (
+                !Character.isWhitespace(cp) &&
+                cp !in available &&
+                dynamicSourceCoverages.none { cp in it }
+            ) {
                 missing += cp
             }
         }
@@ -307,11 +341,11 @@ internal object UnityFontInspector {
         val name = (struct.fields["m_Name"] as? UVal.Str)?.value ?: ""
         val fontBytes = extractFontDataBytes(struct)
         val format = detectFontFormat(fontBytes)
-        val supportsArabic = if (fontBytes.isNotEmpty()) {
-            TtfCmapInspector.supportsArabicScript(fontBytes)
-        } else {
-            false
-        }
+        val cmapCoverage = if (fontBytes.isNotEmpty()) TtfCmapInspector.coverage(fontBytes) else null
+        val supportsArabic = cmapCoverage?.ranges?.any { range ->
+            (range.first <= 0x064A && range.last >= 0x0627) ||
+                (range.first <= 0xFEFC && range.last >= 0xFE80)
+        } == true
         val charRects = ((struct.fields["m_CharacterRects"] as? UVal.Arr)?.items?.size) ?: 0
         return UnityRawFontReport(
             entryName = entryName,
@@ -322,6 +356,7 @@ internal object UnityFontInspector {
             fontFormat = format,
             supportsArabicCmap = supportsArabic,
             characterRectCount = charRects,
+            cmapCoverage = cmapCoverage,
         )
     }
 
@@ -600,86 +635,218 @@ internal object UnityFontInspector {
  * embedded or user-supplied font file contains Arabic/Persian Unicode mappings.
  */
 internal object TtfCmapInspector {
+    private const val CMAP_TAG = 0x636D6170
+    private const val TTC_TAG = 0x74746366
+    private const val MAX_CMAP_SUBTABLES = 4_096
+    private const val MAX_FORMAT4_VISITS = 1_000_000L
+    private const val MAX_FORMAT12_GROUPS = 100_000
+
     fun isValidFontHeader(bytes: ByteArray): Boolean {
         if (bytes.size < 12) return false
         val magic = ByteBuffer.wrap(bytes, 0, 4).order(ByteOrder.BIG_ENDIAN).int
-        return magic == 0x00010000 || // TrueType
-            magic == 0x4F54544F || // 'OTTO' OpenType CFF
-            magic == 0x74727565 || // 'true'
-            magic == 0x74746366 // 'ttcf' TrueType Collection
+        return magic == 0x00010000 || magic == 0x4F54544F || magic == 0x74727565 || magic == TTC_TAG
     }
 
-    fun supportsArabicScript(bytes: ByteArray): Boolean {
-        if (!isValidFontHeader(bytes)) return false
-        return runCatching {
-            val buf = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
-            val sfntOffset = if (buf.getInt(0) == 0x74746366) {
-                if (bytes.size < 16) return false
-                val numFonts = buf.getInt(8)
-                if (numFonts <= 0) return false
-                buf.getInt(12)
+    fun supportsArabicScript(bytes: ByteArray): Boolean = coverage(bytes)?.ranges?.any { range ->
+        (range.first <= 0x064A && range.last >= 0x0627) ||
+            (range.first <= 0xFEFC && range.last >= 0xFE80)
+    } == true
+
+    /** Parses exact Unicode coverage from bounded cmap format 4/12 subtables. */
+    fun coverage(bytes: ByteArray): TtfCodepointCoverage? {
+        if (!isValidFontHeader(bytes)) return null
+        try {
+            val buffer = ByteBuffer.wrap(bytes).order(ByteOrder.BIG_ENDIAN)
+            val sfntOffset = if (buffer.getInt(0) == TTC_TAG) {
+                if (bytes.size < 16) malformed("truncated TrueType collection header")
+                val fontCount = buffer.getInt(8)
+                if (fontCount <= 0) malformed("TrueType collection has no fonts")
+                buffer.getInt(12)
             } else {
                 0
             }
-            if (sfntOffset < 0 || sfntOffset + 12 > bytes.size) return false
-            val numTables = buf.getShort(sfntOffset + 4).toInt() and 0xFFFF
+            if (!fits(sfntOffset.toLong(), 12L, bytes.size)) malformed("SFNT header is out of bounds")
+            val tableCount = unsignedShort(buffer, sfntOffset + 4)
+            val tableDirectory = sfntOffset + 12
+            if (!fits(tableDirectory.toLong(), tableCount.toLong() * 16L, bytes.size)) {
+                malformed("SFNT table directory is out of bounds")
+            }
+
             var cmapOffset = -1
             var cmapLength = 0
-            val tableDir = sfntOffset + 12
-            for (i in 0 until numTables) {
-                val entry = tableDir + i * 16
-                if (entry + 16 > bytes.size) break
-                val tag = buf.getInt(entry)
-                if (tag == 0x636D6170) { // 'cmap'
-                    cmapOffset = buf.getInt(entry + 8)
-                    cmapLength = buf.getInt(entry + 12)
+            for (index in 0 until tableCount) {
+                val entry = tableDirectory + index * 16
+                if (buffer.getInt(entry) == CMAP_TAG) {
+                    cmapOffset = buffer.getInt(entry + 8)
+                    cmapLength = buffer.getInt(entry + 12)
                     break
                 }
             }
-            if (cmapOffset <= 0 || cmapLength <= 4 || cmapOffset + cmapLength > bytes.size) return false
-            val numSubtables = buf.getShort(cmapOffset + 2).toInt() and 0xFFFF
-            for (i in 0 until numSubtables) {
-                val rec = cmapOffset + 4 + i * 8
-                if (rec + 8 > cmapOffset + cmapLength) break
-                val subOffset = cmapOffset + buf.getInt(rec + 4)
-                if (subOffset < cmapOffset || subOffset + 4 > bytes.size) continue
-                val format = buf.getShort(subOffset).toInt() and 0xFFFF
-                if (format == 4 && subtableFormat4CoversArabic(buf, subOffset, bytes.size)) return true
-                if (format == 12 && subtableFormat12CoversArabic(buf, subOffset, bytes.size)) return true
+            if (cmapOffset < 0) return null
+            if (cmapLength < 4 || !fits(cmapOffset.toLong(), cmapLength.toLong(), bytes.size)) {
+                malformed("cmap table is out of bounds")
             }
-            false
-        }.getOrDefault(false)
+            val cmapEnd = cmapOffset + cmapLength
+            val subtableCount = unsignedShort(buffer, cmapOffset + 2)
+            if (subtableCount !in 1..MAX_CMAP_SUBTABLES ||
+                !fits((cmapOffset + 4).toLong(), subtableCount.toLong() * 8L, cmapEnd)
+            ) {
+                malformed("cmap encoding records are invalid")
+            }
+
+            val ranges = ArrayList<IntRange>()
+            repeat(subtableCount) { index ->
+                val record = cmapOffset + 4 + index * 8
+                val relative = unsignedInt(buffer, record + 4)
+                val subtable = cmapOffset.toLong() + relative
+                if (subtable < cmapOffset || !fits(subtable, 4L, cmapEnd)) {
+                    malformed("cmap subtable offset is out of bounds")
+                }
+                val offset = subtable.toInt()
+                when (unsignedShort(buffer, offset)) {
+                    4 -> ranges += format4Ranges(buffer, offset, cmapEnd)
+                    12 -> ranges += format12Ranges(buffer, offset, cmapEnd)
+                }
+            }
+            val merged = mergeRanges(ranges)
+            return if (merged.isEmpty()) null else TtfCodepointCoverage(merged)
+        } catch (error: UnityFormatException) {
+            throw error
+        } catch (error: RuntimeException) {
+            throw UnityFormatException("Invalid font cmap structure", error)
+        }
     }
 
-    private fun subtableFormat4CoversArabic(buf: ByteBuffer, offset: Int, limit: Int): Boolean {
-        if (offset + 14 > limit) return false
-        val segCountX2 = buf.getShort(offset + 6).toInt() and 0xFFFF
-        val segCount = segCountX2 / 2
+    private fun format4Ranges(buffer: ByteBuffer, offset: Int, parentEnd: Int): List<IntRange> {
+        if (!fits(offset.toLong(), 14L, parentEnd)) malformed("truncated cmap format 4 header")
+        val length = unsignedShort(buffer, offset + 2)
+        if (length < 16 || !fits(offset.toLong(), length.toLong(), parentEnd)) malformed("cmap format 4 length is invalid")
+        val end = offset + length
+        val segmentCountX2 = unsignedShort(buffer, offset + 6)
+        if (segmentCountX2 == 0 || segmentCountX2 and 1 != 0) malformed("cmap format 4 segment count is invalid")
+        val segmentCount = segmentCountX2 / 2
         val endCodesOffset = offset + 14
-        val startCodesOffset = endCodesOffset + segCountX2 + 2
-        if (startCodesOffset + segCountX2 > limit) return false
-        for (s in 0 until segCount) {
-            val endCode = buf.getShort(endCodesOffset + s * 2).toInt() and 0xFFFF
-            val startCode = buf.getShort(startCodesOffset + s * 2).toInt() and 0xFFFF
-            if (startCode <= 0x064A && endCode >= 0x0627) return true
-            if (startCode <= 0xFEFC && endCode >= 0xFE80) return true
+        val startCodesOffset = endCodesOffset + segmentCountX2 + 2
+        val deltasOffset = startCodesOffset + segmentCountX2
+        val rangeOffsetsOffset = deltasOffset + segmentCountX2
+        if (!fits(rangeOffsetsOffset.toLong(), segmentCountX2.toLong(), end)) malformed("cmap format 4 arrays are out of bounds")
+
+        var visits = 0L
+        repeat(segmentCount) { index ->
+            val start = unsignedShort(buffer, startCodesOffset + index * 2)
+            val finish = unsignedShort(buffer, endCodesOffset + index * 2)
+            if (start > finish) malformed("cmap format 4 segment is reversed")
+            visits += finish.toLong() - start + 1L
+            if (visits > MAX_FORMAT4_VISITS) malformed("cmap format 4 exceeds the visit budget")
         }
-        return false
+
+        val covered = BooleanArray(0x10000)
+        repeat(segmentCount) { index ->
+            val start = unsignedShort(buffer, startCodesOffset + index * 2)
+            val finish = unsignedShort(buffer, endCodesOffset + index * 2)
+            val delta = buffer.getShort(deltasOffset + index * 2).toInt()
+            val rangeOffsetPosition = rangeOffsetsOffset + index * 2
+            val rangeOffset = unsignedShort(buffer, rangeOffsetPosition)
+            for (codepoint in start..finish) {
+                val glyph = if (rangeOffset == 0) {
+                    (codepoint + delta) and 0xFFFF
+                } else {
+                    val glyphAddress = rangeOffsetPosition.toLong() + rangeOffset + 2L * (codepoint - start)
+                    if (!fits(glyphAddress, 2L, end)) malformed("cmap format 4 glyph address is out of bounds")
+                    val raw = unsignedShort(buffer, glyphAddress.toInt())
+                    if (raw == 0) 0 else (raw + delta) and 0xFFFF
+                }
+                if (glyph != 0) covered[codepoint] = true
+            }
+        }
+        return booleanRanges(covered)
     }
 
-    private fun subtableFormat12CoversArabic(buf: ByteBuffer, offset: Int, limit: Int): Boolean {
-        if (offset + 16 > limit) return false
-        val numGroups = buf.getInt(offset + 12)
-        if (numGroups <= 0 || numGroups > 100_000) return false
+    private fun format12Ranges(buffer: ByteBuffer, offset: Int, parentEnd: Int): List<IntRange> {
+        if (!fits(offset.toLong(), 16L, parentEnd)) malformed("truncated cmap format 12 header")
+        val length = unsignedInt(buffer, offset + 4)
+        if (length < 16L || !fits(offset.toLong(), length, parentEnd)) malformed("cmap format 12 length is invalid")
+        val groupCountLong = unsignedInt(buffer, offset + 12)
+        if (groupCountLong !in 1L..MAX_FORMAT12_GROUPS.toLong()) malformed("cmap format 12 group count is invalid")
+        val groupCount = groupCountLong.toInt()
         val groupsOffset = offset + 16
-        if (groupsOffset + numGroups * 12 > limit) return false
-        for (g in 0 until numGroups) {
-            val base = groupsOffset + g * 12
-            val startCode = buf.getInt(base)
-            val endCode = buf.getInt(base + 4)
-            if (startCode <= 0x064A && endCode >= 0x0627) return true
-            if (startCode <= 0xFEFC && endCode >= 0xFE80) return true
+        if (!fits(groupsOffset.toLong(), groupCountLong * 12L, offset.toLong() + length)) malformed("cmap format 12 groups are out of bounds")
+
+        val ranges = ArrayList<IntRange>(groupCount)
+        repeat(groupCount) { index ->
+            val base = groupsOffset + index * 12
+            val rawStart = unsignedInt(buffer, base)
+            val rawEnd = unsignedInt(buffer, base + 4)
+            val startGlyph = unsignedInt(buffer, base + 8)
+            if (rawStart > rawEnd) malformed("cmap format 12 group is reversed")
+            if (rawEnd > Character.MAX_CODE_POINT.toLong()) {
+                malformed("cmap format 12 group exceeds Unicode")
+            }
+            var start = rawStart
+            val finish = rawEnd
+            if (startGlyph == 0L) start++
+            if (start <= finish) ranges += start.toInt()..finish.toInt()
         }
-        return false
+        return ranges
     }
+
+    private fun booleanRanges(values: BooleanArray): List<IntRange> {
+        val result = ArrayList<IntRange>()
+        var index = 0
+        while (index < values.size) {
+            if (!values[index]) {
+                index++
+                continue
+            }
+            val start = index
+            while (index + 1 < values.size && values[index + 1]) index++
+            result += start..index
+            index++
+        }
+        return result
+    }
+
+    private fun mergeRanges(input: List<IntRange>): List<IntRange> {
+        if (input.isEmpty()) return emptyList()
+        val sorted = input.asSequence()
+            .map { range ->
+                if (range.first < 0 || range.last < range.first || range.last > Character.MAX_CODE_POINT) {
+                    malformed("parsed cmap range exceeds Unicode")
+                }
+                range
+            }
+            .sortedWith(compareBy<IntRange> { it.first }.thenBy { it.last })
+            .toList()
+        if (sorted.isEmpty()) return emptyList()
+        val merged = ArrayList<IntRange>()
+        var start = sorted.first().first
+        var finish = sorted.first().last
+        for (index in 1 until sorted.size) {
+            val next = sorted[index]
+            if (next.first.toLong() <= finish.toLong() + 1L) {
+                if (next.last > finish) finish = next.last
+            } else {
+                merged += start..finish
+                start = next.first
+                finish = next.last
+            }
+        }
+        merged += start..finish
+        return merged
+    }
+
+    private fun malformed(detail: String): Nothing =
+        throw UnityFormatException("Invalid font cmap: $detail")
+
+    private fun unsignedShort(buffer: ByteBuffer, offset: Int): Int =
+        buffer.getShort(offset).toInt() and 0xFFFF
+
+    private fun unsignedInt(buffer: ByteBuffer, offset: Int): Long =
+        buffer.getInt(offset).toLong() and 0xFFFF_FFFFL
+
+    private fun fits(offset: Long, length: Long, limit: Int): Boolean =
+        offset >= 0L && length >= 0L && offset <= limit.toLong() && length <= limit.toLong() - offset
+
+    private fun fits(offset: Long, length: Long, limit: Long): Boolean =
+        offset >= 0L && length >= 0L && offset <= limit && length <= limit - offset
 }

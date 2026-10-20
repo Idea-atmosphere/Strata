@@ -1,5 +1,7 @@
 package dev.cluvex.strata.feature.unity
 
+import android.os.Environment
+import android.provider.DocumentsContract
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.result.contract.ActivityResultContracts
@@ -43,6 +45,7 @@ import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
@@ -56,6 +59,7 @@ import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.cluvex.strata.R
 import dev.cluvex.strata.core.archive.ArchiveParent
 import dev.cluvex.strata.core.model.FileItem
+import dev.cluvex.strata.core.open.IncomingPaths
 import dev.cluvex.strata.core.unity.LocalizationAddLanguagePlan
 import dev.cluvex.strata.core.unity.LocalizationImportPlan
 import dev.cluvex.strata.core.unity.LocalizationSource
@@ -64,14 +68,24 @@ import dev.cluvex.strata.core.unity.UnityBundleEntry
 import dev.cluvex.strata.core.unity.UnityBundleRewriteEstimate
 import dev.cluvex.strata.core.unity.UnityFileKind
 import dev.cluvex.strata.core.unity.UnityFontReport
+import dev.cluvex.strata.core.unity.UnityLocalizationOpenRequest
+import dev.cluvex.strata.core.unity.UnityLocalizationScanProgress
 import dev.cluvex.strata.core.unity.UnityProbe
+import dev.cluvex.strata.core.unity.UnityRtlFlagInference
+import dev.cluvex.strata.core.unity.UnityRtlInferenceStatus
 import dev.cluvex.strata.core.unity.UnityTextInfo
 import dev.cluvex.strata.core.unity.UnityTextTransformOptions
 import dev.cluvex.strata.core.unity.UnityTextUnavailableReason
+import dev.cluvex.strata.core.unity.UnityTranslationFontCoverage
+import dev.cluvex.strata.core.unity.UnityTranslationNextAction
+import dev.cluvex.strata.core.unity.UnityTranslationReadiness
 import dev.cluvex.strata.core.util.Formatters
 import dev.cluvex.strata.ui.isolated
+import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
+import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
@@ -81,9 +95,11 @@ fun UnityAssetScreen(
     path: String,
     parents: List<ArchiveParent>,
     refreshToken: Long,
+    autoInspectLocalizations: Boolean = false,
     onBack: () -> Unit,
     onOpenFile: (FileItem) -> Unit,
     onOpenNested: (File, List<ArchiveParent>) -> Unit,
+    onOpenDiscoveryCandidate: (UnityLocalizationOpenRequest) -> Unit,
     onSignApk: (File) -> Unit,
     onLocate: (folder: String, reveal: String?) -> Unit,
     vm: UnityAssetViewModel = viewModel(),
@@ -96,11 +112,15 @@ fun UnityAssetScreen(
     var signPrompt by remember(path) { mutableStateOf(false) }
     var fontRewritePrompt by remember(path) { mutableStateOf<UnityBundleRewriteEstimate?>(null) }
     var addLanguagePrompt by remember(path) { mutableStateOf(false) }
+    var showDiscovery by rememberSaveable(path) { mutableStateOf(false) }
+    var discoveryStaging by remember(path) { mutableStateOf(false) }
+    var discoveryStagingIdentity by remember(path) { mutableStateOf<String?>(null) }
+    var discoveryStagingJob by remember(path) { mutableStateOf<Job?>(null) }
     var newLanguageName by remember(path) { mutableStateOf("") }
     var newLanguageCode by remember(path) { mutableStateOf("") }
 
-    LaunchedEffect(path, refreshToken) {
-        vm.open(path)
+    LaunchedEffect(path, refreshToken, autoInspectLocalizations) {
+        vm.open(path, autoInspectLocalizations)
         vm.refreshEditedFiles()
     }
     LifecycleResumeEffect(path) {
@@ -112,6 +132,9 @@ fun UnityAssetScreen(
             snackbar.showSnackbar(it)
             vm.consumeMessage()
         }
+    }
+    LaunchedEffect(state.output?.path, state.outputNeedsSigning) {
+        if (state.output != null && state.outputNeedsSigning) signPrompt = true
     }
     LaunchedEffect(state.navigateTo) {
         state.navigateTo?.let { target ->
@@ -177,14 +200,83 @@ fun UnityAssetScreen(
         }
     }
 
-    BackHandler(enabled = !busy) { onBack() }
+    val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
+        if (uri != null) {
+            val documentId = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull()
+            val localPath = documentId?.let {
+                IncomingPaths.fromDocumentId(
+                    uri.authority,
+                    it,
+                    Environment.getExternalStorageDirectory().path,
+                )
+            }
+            if (localPath == null) {
+                vm.notifyMessage(context.getString(R.string.unity_discovery_folder_unavailable))
+            } else {
+                showDiscovery = true
+                vm.discoverLocalizationDirectory(File(localPath), localPath)
+            }
+        }
+    }
+
+    val apkPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) {
+            showDiscovery = true
+            discoveryStaging = true
+            discoveryStagingIdentity = uri.toString()
+            discoveryStagingJob = scope.launch {
+                localBusy = true
+                try {
+                    val apk = runInterruptible(Dispatchers.IO) {
+                        val documentId = runCatching { DocumentsContract.getDocumentId(uri) }.getOrNull()
+                        val local = documentId?.let {
+                            IncomingPaths.fromDocumentId(
+                                uri.authority,
+                                it,
+                                Environment.getExternalStorageDirectory().path,
+                            )
+                        }?.let(::File)?.takeIf(File::isFile)
+                        local ?: stagePickedApk(
+                            context.cacheDir,
+                            uri.toString(),
+                            open = {
+                                context.contentResolver.openInputStream(uri)
+                                    ?: throw IOException("APK source unavailable")
+                            },
+                        )
+                    }
+                    vm.discoverLocalizationApk(apk, apk.path)
+                } catch (_: CancellationException) {
+                    // The temporary file is deleted by stagePickedApk.
+                } catch (error: Exception) {
+                    val detail = error.message?.takeIf { it.isNotBlank() }
+                    vm.notifyMessage(
+                        if (detail == null) context.getString(R.string.unity_operation_failed)
+                        else context.getString(R.string.unity_operation_failed_detail, detail),
+                    )
+                } finally {
+                    discoveryStaging = false
+                    discoveryStagingIdentity = null
+                    discoveryStagingJob = null
+                    localBusy = false
+                }
+            }
+        }
+    }
+
+    fun leave() {
+        discoveryStagingJob?.cancel()
+        vm.clearDiscovery()
+        onBack()
+    }
+    BackHandler(enabled = !busy && !state.discoveryRunning) { leave() }
 
     Scaffold(
         snackbarHost = { SnackbarHost(snackbar) },
         topBar = {
             TopAppBar(
                 navigationIcon = {
-                    IconButton(onClick = onBack, enabled = !busy) {
+                    IconButton(onClick = ::leave, enabled = !busy && !state.discoveryRunning) {
                         Icon(Icons.AutoMirrored.Rounded.ArrowBack, contentDescription = stringResource(R.string.common_back))
                     }
                 },
@@ -217,6 +309,29 @@ fun UnityAssetScreen(
                         Text(stringResource(R.string.unity_parent_copy_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
                     } else {
                         Text(stringResource(R.string.unity_output_copy_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
+                    }
+                    Row(
+                        Modifier.fillMaxWidth().padding(bottom = 6.dp),
+                        horizontalArrangement = Arrangement.spacedBy(6.dp),
+                    ) {
+                        OutlinedButton(
+                            onClick = { folderPicker.launch(null) },
+                            enabled = !busy && !state.discoveryRunning,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(stringResource(R.string.unity_discovery_pick_folder), maxLines = 1)
+                        }
+                        OutlinedButton(
+                            onClick = {
+                                apkPicker.launch(
+                                    arrayOf("application/vnd.android.package-archive", "application/zip"),
+                                )
+                            },
+                            enabled = !busy && !state.discoveryRunning,
+                            modifier = Modifier.weight(1f),
+                        ) {
+                            Text(stringResource(R.string.unity_discovery_scan_apk), maxLines = 1)
+                        }
                     }
                     if (document.summary.entries.isEmpty()) {
                         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
@@ -281,6 +396,11 @@ fun UnityAssetScreen(
                             sources = state.localizationSources[entry.name].orEmpty(),
                             selected = selectedLocalization?.takeIf { it.origin.entryName == entry.name },
                             sourceLanguageCode = state.localizationSourceLanguageCode,
+                            targetLanguageCode = state.localizationTargetLanguageCode,
+                            rtlInference = state.rtlFlagInference,
+                            fontCoverage = state.fontCoverage,
+                            readiness = state.translationReadiness,
+                            canValidateAndStage = state.canValidateAndStageLocalization,
                             addPlan = state.localizationAddPlan,
                             importPlan = state.localizationImportPlan,
                             hasTsv = state.localizationTsv?.isFile == true,
@@ -288,8 +408,20 @@ fun UnityAssetScreen(
                             onToggleShapeArabic = vm::setShapeArabic,
                             onToggleReverseBidi = vm::setReverseBidi,
                             onFind = { vm.inspectLocalizations(entry) },
+                            onDiscoverSource = { showDiscovery = true },
                             onSelectTable = vm::selectLocalizationTable,
                             onSelectSourceLanguage = vm::setLocalizationSourceLanguage,
+                            onSelectTargetLanguage = vm::setLocalizationTargetLanguage,
+                            onInspectFont = {
+                                if (state.fontCoverage == null) {
+                                    vm.inspectFonts(entry)
+                                } else {
+                                    val estimate = vm.estimateRewrite()
+                                    if (estimate != null) fontRewritePrompt = estimate
+                                    else fontTtfPicker.launch(arrayOf("*/*"))
+                                }
+                            },
+                            onExportPackage = { vm.repack(parents) },
                             onExportAll = { vm.exportLocalization() },
                             onExportLanguage = vm::exportLocalization,
                             onAddLanguage = {
@@ -337,6 +469,34 @@ fun UnityAssetScreen(
         }
     }
 
+    if (showDiscovery) {
+        val dialogState = if (discoveryStaging) {
+            state.copy(
+                discoveryRunning = true,
+                discoveryProgress = UnityLocalizationScanProgress(0, 1, 0L, discoveryStagingIdentity),
+                discoveryReport = null,
+                discoveryScopeLabel = discoveryStagingIdentity,
+            )
+        } else {
+            state
+        }
+        UnityLocalizationDiscoveryDialog(
+            state = dialogState,
+            onPickFolder = { folderPicker.launch(null) },
+            onPickApk = {
+                apkPicker.launch(arrayOf("application/vnd.android.package-archive", "application/zip"))
+            },
+            onOpen = { request -> onOpenDiscoveryCandidate(request) },
+            onCancel = {
+                if (discoveryStaging) discoveryStagingJob?.cancel() else vm.cancelDiscovery()
+            },
+            onDismiss = {
+                showDiscovery = false
+                if (!dialogState.discoveryRunning) vm.clearDiscovery()
+            },
+        )
+    }
+
     if (addLanguagePrompt) {
         AlertDialog(
             onDismissRequest = { addLanguagePrompt = false },
@@ -378,7 +538,14 @@ fun UnityAssetScreen(
         AlertDialog(
             onDismissRequest = { signPrompt = false },
             title = { Text(stringResource(R.string.unity_sign_copy)) },
-            text = { Text(stringResource(R.string.unity_sign_prompt)) },
+            text = {
+                Text(
+                    stringResource(
+                        if (state.outputNeedsSigning) R.string.unity_sign_missing_certificate
+                        else R.string.unity_sign_prompt,
+                    ),
+                )
+            },
             confirmButton = {
                 TextButton(onClick = {
                     signPrompt = false
@@ -592,6 +759,11 @@ private fun LocalizationActions(
     sources: List<LocalizationSource>,
     selected: LocalizationSource?,
     sourceLanguageCode: String?,
+    targetLanguageCode: String?,
+    rtlInference: UnityRtlFlagInference?,
+    fontCoverage: UnityTranslationFontCoverage?,
+    readiness: UnityTranslationReadiness,
+    canValidateAndStage: Boolean,
     addPlan: LocalizationAddLanguagePlan?,
     importPlan: LocalizationImportPlan?,
     hasTsv: Boolean,
@@ -599,14 +771,36 @@ private fun LocalizationActions(
     onToggleShapeArabic: (Boolean) -> Unit,
     onToggleReverseBidi: (Boolean) -> Unit,
     onFind: () -> Unit,
+    onDiscoverSource: () -> Unit,
     onSelectTable: (String) -> Unit,
     onSelectSourceLanguage: (String) -> Unit,
+    onSelectTargetLanguage: (String) -> Unit,
+    onInspectFont: () -> Unit,
+    onExportPackage: () -> Unit,
     onExportAll: () -> Unit,
     onExportLanguage: (String) -> Unit,
     onAddLanguage: () -> Unit,
     onValidateImport: () -> Unit,
     onApply: () -> Unit,
 ) {
+    var targetPrompt by remember(selected?.origin?.tableId) { mutableStateOf(false) }
+    var readinessPrompt by remember(selected?.origin?.tableId) { mutableStateOf(false) }
+    val performReadinessAction: (UnityTranslationNextAction) -> Unit = { action ->
+        when (action) {
+            UnityTranslationNextAction.DISCOVER_TABLES -> onFind()
+            UnityTranslationNextAction.SELECT_TARGET_LANGUAGE -> targetPrompt = true
+            UnityTranslationNextAction.INSPECT_OR_REPLACE_FONT -> onInspectFont()
+            UnityTranslationNextAction.USE_SUPPORTED_COMPRESSION -> onDiscoverSource()
+            UnityTranslationNextAction.PREPARE_TRANSLATION -> {
+                if (hasTsv) onValidateImport()
+                else targetLanguageCode?.let(onExportLanguage) ?: run { targetPrompt = true }
+            }
+            UnityTranslationNextAction.VALIDATE_AND_STAGE,
+            UnityTranslationNextAction.REVIEW_ROUND_TRIP_FAILURE -> onApply()
+            UnityTranslationNextAction.EXPORT_OUTPUT -> onExportPackage()
+        }
+    }
+
     Surface(
         shape = RoundedCornerShape(20.dp),
         color = MaterialTheme.colorScheme.surfaceContainer,
@@ -620,7 +814,11 @@ private fun LocalizationActions(
                 }
             } else {
                 Text(
-                    stringResource(R.string.unity_localization_tables_summary, sources.size, sources.sumOf { it.terms.size }),
+                    stringResource(
+                        R.string.unity_localization_tables_summary,
+                        sources.size,
+                        sources.sumOf { it.terms.size },
+                    ),
                     style = MaterialTheme.typography.bodySmall,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                 )
@@ -672,6 +870,20 @@ private fun LocalizationActions(
                             }
                         }
                     }
+                    OutlinedButton(
+                        onClick = { targetPrompt = true },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            if (targetLanguageCode == null) {
+                                stringResource(R.string.unity_localization_choose_target)
+                            } else {
+                                stringResource(R.string.unity_localization_target_selected, targetLanguageCode)
+                            },
+                            maxLines = 1,
+                        )
+                    }
                     Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
                         Row(Modifier.weight(1f), verticalAlignment = Alignment.CenterVertically) {
                             Checkbox(
@@ -708,7 +920,7 @@ private fun LocalizationActions(
                         }
                         Button(
                             onClick = onApply,
-                            enabled = !busy && (addPlan?.canApply == true || importPlan?.canApply == true),
+                            enabled = !busy && canValidateAndStage,
                             modifier = Modifier.weight(1f),
                         ) {
                             Text(stringResource(R.string.unity_localization_apply), maxLines = 1)
@@ -722,7 +934,8 @@ private fun LocalizationActions(
                                 plan.estimatedDataDeltaBytes,
                             ),
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (plan.canApply) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.error,
+                            color = if (plan.canApply) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.error,
                         )
                     }
                     importPlan?.let { plan ->
@@ -736,12 +949,124 @@ private fun LocalizationActions(
                                 plan.placeholderFailureCount,
                             ),
                             style = MaterialTheme.typography.bodySmall,
-                            color = if (plan.canApply) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.tertiary,
+                            color = if (plan.canApply) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.tertiary,
+                        )
+                    }
+                    rtlInference?.let { inference ->
+                        Text(
+                            if (inference.status == UnityRtlInferenceStatus.DETERMINED) {
+                                stringResource(
+                                    R.string.unity_rtl_flag_determined,
+                                    "0x${inference.bitMask!!.toUInt().toString(16)}",
+                                    inference.targetFlags!!,
+                                )
+                            } else {
+                                stringResource(R.string.unity_rtl_flag_not_determined)
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (inference.status == UnityRtlInferenceStatus.DETERMINED) {
+                                MaterialTheme.colorScheme.primary
+                            } else {
+                                MaterialTheme.colorScheme.tertiary
+                            },
+                        )
+                    }
+                    fontCoverage?.let { coverage ->
+                        val missing = coverage.missingCodepoints.take(32).joinToString(
+                            separator = ", ",
+                            postfix = if (coverage.missingCount > 32) ", …" else "",
+                        ) {
+                            "U+${it.toString(16).uppercase().padStart(4, '0')}"
+                        }
+                        Text(
+                            when {
+                                coverage.complete -> stringResource(
+                                    R.string.unity_font_coverage_ready,
+                                    coverage.targetCodepointCount,
+                                )
+                                coverage.unavailableReason != null -> unityTextIssueLabel(
+                                    coverage.unavailableReason,
+                                )
+                                else -> stringResource(
+                                    R.string.unity_font_coverage_missing,
+                                    coverage.missingCount,
+                                    missing,
+                                )
+                            },
+                            style = MaterialTheme.typography.bodySmall,
+                            color = if (coverage.complete) MaterialTheme.colorScheme.primary
+                            else MaterialTheme.colorScheme.error,
+                        )
+                    }
+                    OutlinedButton(
+                        onClick = { readinessPrompt = true },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            stringResource(
+                                R.string.unity_readiness_next_action,
+                                unityReadinessActionLabel(readiness.nextAction),
+                            ),
+                            maxLines = 2,
                         )
                     }
                 }
             }
         }
+    }
+
+    if (targetPrompt && selected != null) {
+        AlertDialog(
+            onDismissRequest = { targetPrompt = false },
+            title = { Text(stringResource(R.string.unity_localization_choose_target)) },
+            text = {
+                LazyColumn(verticalArrangement = Arrangement.spacedBy(4.dp)) {
+                    items(selected.languages, key = { it.code }) { language ->
+                        TextButton(
+                            onClick = {
+                                onSelectTargetLanguage(language.code)
+                                targetPrompt = false
+                            },
+                            enabled = !busy,
+                            modifier = Modifier.fillMaxWidth(),
+                        ) {
+                            Text("${language.name} (${language.code})")
+                        }
+                    }
+                }
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { targetPrompt = false }) {
+                    Text(stringResource(R.string.common_cancel))
+                }
+            },
+        )
+    }
+
+    if (readinessPrompt) {
+        AlertDialog(
+            onDismissRequest = { readinessPrompt = false },
+            title = { Text(stringResource(R.string.unity_readiness_title)) },
+            text = {
+                UnityTranslationReadinessPanel(
+                    readiness = readiness,
+                    busy = busy,
+                    onNextAction = { action ->
+                        readinessPrompt = false
+                        performReadinessAction(action)
+                    },
+                )
+            },
+            confirmButton = {},
+            dismissButton = {
+                TextButton(onClick = { readinessPrompt = false }) {
+                    Text(stringResource(R.string.common_close))
+                }
+            },
+        )
     }
 }
 

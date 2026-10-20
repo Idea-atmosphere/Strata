@@ -92,6 +92,7 @@ data class ApkDialogActions(
     val onSign: () -> Unit,
     val onDetails: () -> Unit,
     val onDexTools: () -> Unit,
+    val onUnityTranslation: () -> Unit,
     val onGoTo: (folder: String, reveal: String?) -> Unit,
     val onMessage: (String) -> Unit,
 )
@@ -403,6 +404,10 @@ private fun ButtonRow(
                     DropdownMenuItem(text = { Text(stringResource(R.string.common_sign_apk)) }, onClick = { menu = false; actions.onSign() })
                     DropdownMenuItem(text = { Text(stringResource(R.string.apk_details)) }, onClick = { menu = false; actions.onDetails() })
                     DropdownMenuItem(text = { Text(stringResource(R.string.apk_dex_tools)) }, onClick = { menu = false; actions.onDexTools() })
+                    DropdownMenuItem(
+                        text = { Text(stringResource(R.string.unity_discovery_apk_action)) },
+                        onClick = { menu = false; actions.onUnityTranslation() },
+                    )
                     DropdownMenuItem(text = { Text(stringResource(R.string.apk_extract_icon)) }, onClick = { menu = false; vm.extractIcon() })
                 }
                 val installed = s.installed

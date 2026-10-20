@@ -123,6 +123,7 @@ import dev.cluvex.strata.feature.share.ShareScreen
 import dev.cluvex.strata.feature.termux.LanguagesScreen
 import dev.cluvex.strata.feature.trash.RecycleBinScreen
 import dev.cluvex.strata.feature.unity.UnityAssetScreen
+import dev.cluvex.strata.feature.unity.UnityLocalizationDiscoveryScreen
 import dev.cluvex.strata.ui.drawer.DrawerActions
 import dev.cluvex.strata.ui.drawer.StrataDrawerContent
 import java.io.File
@@ -144,7 +145,15 @@ sealed interface Route {
     data class Search(val root: String) : Route
     data class ApkInfo(val path: String) : Route
     data class Archive(val path: String, val parents: List<ArchiveParent> = emptyList()) : Route
-    data class UnityAsset(val path: String, val parents: List<ArchiveParent> = emptyList()) : Route
+    data class UnityAsset(
+        val path: String,
+        val parents: List<ArchiveParent> = emptyList(),
+        val autoInspectLocalizations: Boolean = false,
+    ) : Route
+    data class UnityDiscovery(
+        val initialApkPath: String? = null,
+        val parents: List<ArchiveParent> = emptyList(),
+    ) : Route
     data class Image(val path: String) : Route
     data class Video(val path: String) : Route
     data class Font(val path: String) : Route
@@ -456,6 +465,10 @@ fun AppShell(
                 onSign = { openDialog = OpenDialog.SignApk(FileItem.of(File(d.path))) },
                 onDetails = { openDialog = null; stack.push(Route.ApkInfo(d.path)) },
                 onDexTools = { openDialog = null; stack.push(Route.Dex(d.path)) },
+                onUnityTranslation = {
+                    openDialog = null
+                    stack.push(Route.UnityDiscovery(d.path, d.parents))
+                },
                 onGoTo = { folder, reveal -> locate(folder, reveal) },
                 onMessage = ::message,
             ),
@@ -595,11 +608,28 @@ private fun Screen(
             path = r.path,
             parents = r.parents,
             refreshToken = refreshToken,
+            autoInspectLocalizations = r.autoInspectLocalizations,
             onBack = actions.pop,
             onOpenFile = actions.openFile,
             onOpenNested = actions.openNestedFile,
+            onOpenDiscoveryCandidate = { request ->
+                actions.push(Route.UnityAsset(request.file.path, request.parents, autoInspectLocalizations = true))
+            },
             onSignApk = { file -> actions.signApk(FileItem.of(file)) },
             onLocate = actions.locate,
+        )
+        is Route.UnityDiscovery -> UnityLocalizationDiscoveryScreen(
+            initialApkPath = r.initialApkPath,
+            onBack = actions.pop,
+            onOpen = { request ->
+                actions.push(
+                    Route.UnityAsset(
+                        request.file.path,
+                        r.parents + request.parents,
+                        autoInspectLocalizations = true,
+                    ),
+                )
+            },
         )
         is Route.Image -> ImageViewerScreen(
             path = r.path,

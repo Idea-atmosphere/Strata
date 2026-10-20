@@ -1,14 +1,24 @@
 package dev.cluvex.strata.core.unity
 
 import com.google.common.truth.Truth.assertThat
+import dev.cluvex.strata.core.archive.ArchiveParent
+import dev.cluvex.strata.feature.unity.stagePickedApk
+import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
+import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
 import org.junit.Assert.assertThrows
 import org.junit.Test
+import java.io.ByteArrayInputStream
 import java.io.ByteArrayOutputStream
 import java.io.DataOutputStream
 import java.io.File
 import java.io.FileOutputStream
+import java.io.IOException
 import java.nio.file.Files
 import java.security.MessageDigest
+import java.util.Random
+import java.util.zip.ZipEntry
+import java.util.zip.ZipFile
+import java.util.zip.ZipOutputStream
 
 class UnityLocalizationWorkflowTest {
     @Test
@@ -193,6 +203,7 @@ class UnityLocalizationWorkflowTest {
 
             assertThat(report.scannedFiles).isEqualTo(1)
             assertThat(report.stoppedByBudget).isTrue()
+            assertThat(report.budgetStopReason).isEqualTo(UnityLocalizationBudgetStopReason.SOURCE_BYTES)
             assertThat(report.candidates.single().path).isEqualTo(small.canonicalPath)
             assertThat(progress.first()).isEqualTo(small.canonicalPath)
         } finally {
@@ -201,7 +212,7 @@ class UnityLocalizationWorkflowTest {
     }
 
     @Test
-    fun discoveryCacheKeyIncludesScopeAndReportedFileIdentity() {
+    fun discoveryCacheKeyIncludesScopeAndNeverMasksChangedSourceMetadata() {
         val root = Files.createTempDirectory("localization-cache").toFile()
         try {
             val serialized = writeLocalizationSerialized(root, "table.assets")
@@ -220,16 +231,228 @@ class UnityLocalizationWorkflowTest {
             assertThat(first.candidates.single().tableCount).isEqualTo(1)
 
             bundle.writeBytes(byteArrayOf(1))
-            val cached = UnityLocalizationDiscovery.scan(listOf(firstRequest), File(root, "cache"))
-            assertThat(cached.candidates.single().tableCount).isEqualTo(1)
+            val changed = UnityLocalizationDiscovery.scan(listOf(firstRequest), File(root, "cache"))
+            assertThat(changed.candidates.single().reason)
+                .isEqualTo(UnityLocalizationCandidateReason.SOURCE_METADATA_MISMATCH)
 
+            writeFixtureBundle(root, "candidate.bin", serialized.readBytes(), "arbitrary")
+            assertThat(bundle.setLastModified(modified)).isTrue()
             val otherScope = UnityLocalizationDiscovery.scan(
                 listOf(firstRequest.copy(scope = "scope-b")),
                 File(root, "cache"),
             )
-            assertThat(otherScope.candidates.single().tableCount).isEqualTo(0)
+            assertThat(otherScope.candidates.single().tableCount).isEqualTo(1)
         } finally {
             UnityLocalizationDiscovery.clearCache()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun discoveryResultsPutLocalizationTablesBeforeSmallerNonCandidates() {
+        val root = Files.createTempDirectory("localization-result-ranking").toFile()
+        try {
+            val serialized = writeLocalizationSerialized(root, "table.assets")
+            val candidate = writeFixtureBundle(root, "candidate.bin", serialized.readBytes(), "opaque")
+            val decoy = File(root, "tiny.bin").apply { writeText("x") }
+            val report = UnityLocalizationDiscovery.scan(
+                listOf(UnityLocalizationScanRequest(decoy), UnityLocalizationScanRequest(candidate)),
+                File(root, "cache"),
+                UnityLocalizationScanBudget(maxFiles = 4, maxSourceBytes = 10_000_000, maxElapsedMillis = 10_000),
+            )
+            assertThat(report.candidates).hasSize(2)
+            assertThat(report.candidates.first().hasLocalizationTables).isTrue()
+            assertThat(report.candidates.last().hasLocalizationTables).isFalse()
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun discoveryReportsEveryInvalidInputWithTypedReason() {
+        val root = Files.createTempDirectory("localization-invalid-inputs").toFile()
+        try {
+            val missing = File(root, "missing.bundle")
+            val directory = File(root, "directory.bundle").apply { mkdirs() }
+            val report = UnityLocalizationDiscovery.scan(
+                listOf(
+                    UnityLocalizationScanRequest(missing, reportedSize = 0L, reportedLastModified = 0L),
+                    UnityLocalizationScanRequest(
+                        directory,
+                        reportedSize = 0L,
+                        reportedLastModified = directory.lastModified(),
+                    ),
+                ),
+                File(root, "cache"),
+            )
+            assertThat(report.scannedFiles).isEqualTo(2)
+            assertThat(report.candidates.map { it.reason }).containsExactly(
+                UnityLocalizationCandidateReason.SOURCE_MISSING,
+                UnityLocalizationCandidateReason.SOURCE_NOT_A_FILE,
+            )
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun discoveryCacheNeverHidesADeletedStagedSource() {
+        val root = Files.createTempDirectory("localization-cache-liveness").toFile()
+        try {
+            val serialized = writeLocalizationSerialized(root, "table.assets")
+            val bundle = writeFixtureBundle(root, "candidate.bundle", serialized.readBytes(), "opaque")
+            val request = UnityLocalizationScanRequest(bundle)
+            UnityLocalizationDiscovery.clearCache()
+            val first = UnityLocalizationDiscovery.scan(listOf(request), File(root, "cache"))
+            assertThat(first.candidates.single().hasLocalizationTables).isTrue()
+            assertThat(bundle.delete()).isTrue()
+            val second = UnityLocalizationDiscovery.scan(listOf(request), File(root, "cache"))
+            assertThat(second.candidates.single().reason)
+                .isEqualTo(UnityLocalizationCandidateReason.SOURCE_MISSING)
+        } finally {
+            UnityLocalizationDiscovery.clearCache()
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun directoryEnumerationStopsAtFileBudgetBeforeBuildingAnUnboundedList() {
+        val root = Files.createTempDirectory("localization-directory-budget").toFile()
+        try {
+            repeat(5) { File(root, "file-$it.bin").writeText("$it") }
+            val listing = UnityLocalizationDirectoryDiscovery.list(
+                root,
+                UnityLocalizationScanBudget(maxFiles = 2, maxSourceBytes = 1024, maxElapsedMillis = 10_000),
+            )
+            assertThat(listing.files).hasSize(2)
+            assertThat(listing.stoppedByBudget).isTrue()
+            assertThat(listing.budgetStopReason).isEqualTo(UnityLocalizationBudgetStopReason.FILE_LIMIT)
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun pickedApkStagingIsBoundedAndCleansFailedTemporaryFiles() {
+        val root = Files.createTempDirectory("localization-picked-apk-limit").toFile()
+        try {
+            assertThrows(IOException::class.java) {
+                stagePickedApk(root, "content://fixture", { ByteArrayInputStream(ByteArray(33)) }, maxBytes = 32)
+            }
+            val staging = File(root, "unity-picked-apk")
+            assertThat(staging.listFiles().orEmpty()).isEmpty()
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun apkListingBudgetStillStagesBoundedShapeMatchedCandidates() {
+        val root = Files.createTempDirectory("localization-apk-list-budget").toFile()
+        try {
+            val serialized = writeLocalizationSerialized(root, "table.assets")
+            val bundle = writeFixtureBundle(root, "payload.bundle", serialized.readBytes(), "opaque-child")
+            val apk = File(root, "sample.apk")
+            ZipOutputStream(FileOutputStream(apk)).use { zip ->
+                repeat(3) { index ->
+                    zip.putNextEntry(ZipEntry("assets/content-$index"))
+                    bundle.inputStream().use { it.copyTo(zip) }
+                    zip.closeEntry()
+                }
+            }
+            UnityLocalizationApkDiscovery.prepare(
+                apk,
+                File(root, "adapter-cache"),
+                "apk-scope",
+                UnityLocalizationScanBudget(maxFiles = 2, maxSourceBytes = 10_000_000, maxElapsedMillis = 10_000),
+            ).use { session ->
+                assertThat(session.requests).hasSize(2)
+                assertThat(session.stoppedByBudget).isTrue()
+                assertThat(session.budgetStopReason).isEqualTo(UnityLocalizationBudgetStopReason.FILE_LIMIT)
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun apkAdapterRejectsShapeMatchedContentAtUnsafeInternalPaths() {
+        val root = Files.createTempDirectory("localization-apk-unsafe-path").toFile()
+        try {
+            val serialized = writeLocalizationSerialized(root, "table.assets")
+            val bundle = writeFixtureBundle(root, "payload.bundle", serialized.readBytes(), "opaque-child")
+            val apk = File(root, "sample.apk")
+            ZipOutputStream(FileOutputStream(apk)).use { zip ->
+                listOf("../opaque", "/absolute", "assets\\backslash").forEach { name ->
+                    zip.putNextEntry(ZipEntry(name))
+                    bundle.inputStream().use { it.copyTo(zip) }
+                    zip.closeEntry()
+                }
+            }
+            UnityLocalizationApkDiscovery.prepare(apk, File(root, "adapter-cache"), "apk-scope").use { session ->
+                assertThat(session.requests).isEmpty()
+                assertThat(session.failures).hasSize(3)
+                assertThat(session.failures.map { it.reason }.toSet())
+                    .containsExactly(UnityLocalizationCandidateReason.ARCHIVE_ENTRY_UNSAFE_PATH)
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun apkAdapterRejectsDuplicateEntryIdentityInsteadOfOpeningAnAmbiguousParent() {
+        val root = Files.createTempDirectory("localization-apk-duplicate").toFile()
+        try {
+            val serialized = writeLocalizationSerialized(root, "table.assets")
+            val bundle = writeFixtureBundle(root, "payload.bundle", serialized.readBytes(), "opaque-child")
+            val apk = File(root, "sample.apk")
+            ZipArchiveOutputStream(apk).use { zip ->
+                repeat(2) {
+                    zip.putArchiveEntry(ZipArchiveEntry("assets/duplicate"))
+                    bundle.inputStream().use { it.copyTo(zip) }
+                    zip.closeArchiveEntry()
+                }
+            }
+            UnityLocalizationApkDiscovery.prepare(apk, File(root, "adapter-cache"), "apk-scope").use { session ->
+                assertThat(session.requests).isEmpty()
+                assertThat(session.failures.single().reason)
+                    .isEqualTo(UnityLocalizationCandidateReason.ARCHIVE_ENTRY_DUPLICATE)
+                assertThat(session.failures.single().openRequest).isNull()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun apkAdapterFindsContentNamedArbitrarilyAndRetainsParentIdentityUntilClose() {
+        val root = Files.createTempDirectory("localization-apk-adapter").toFile()
+        try {
+            val serialized = writeLocalizationSerialized(root, "table.assets")
+            val bundle = writeFixtureBundle(root, "payload.bundle", serialized.readBytes(), "opaque-child")
+            val apk = File(root, "sample.apk")
+            ZipOutputStream(FileOutputStream(apk)).use { zip ->
+                zip.putNextEntry(ZipEntry("assets/no-extension-random-name"))
+                bundle.inputStream().use { it.copyTo(zip) }
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("assets/name-only.assets"))
+                zip.write("not unity".toByteArray())
+                zip.closeEntry()
+            }
+            val session = UnityLocalizationApkDiscovery.prepare(apk, File(root, "adapter-cache"), "apk-scope")
+            val staged = session.requests.single().file
+            assertThat(session.requests.single().identity)
+                .isEqualTo("${apk.canonicalPath}!/assets/no-extension-random-name")
+            assertThat(session.requests.single().openRequest.parents).containsExactly(
+                ArchiveParent(apk.canonicalPath, "assets/no-extension-random-name"),
+            )
+            val report = session.merge(UnityLocalizationDiscovery.scan(session.requests, File(root, "scan-cache")))
+            assertThat(report.candidates.single().tableCount).isEqualTo(1)
+            assertThat(staged.isFile).isTrue()
+            session.close()
+            assertThat(staged.exists()).isFalse()
+        } finally {
             root.deleteRecursively()
         }
     }
@@ -253,6 +476,196 @@ class UnityLocalizationWorkflowTest {
     }
 
     @Test
+    fun rtlInferenceChangesOnlyOneRuntimeDerivedBitAndNeverGuessesAmbiguity() {
+        val resolver = UnityLanguageDirectionResolver { code ->
+            when (code) {
+                "la-AA", "lb-BB" -> UnityLanguageDirection.LEFT_TO_RIGHT
+                "ra-AA", "fa" -> UnityLanguageDirection.RIGHT_TO_LEFT
+                else -> UnityLanguageDirection.UNKNOWN
+            }
+        }
+        val languages = listOf(
+            LocalizationLanguage("Left A", "la-AA", 0b1000),
+            LocalizationLanguage("Left B", "lb-BB", 0b1000),
+            LocalizationLanguage("Right A", "ra-AA", 0b1010),
+        )
+        val inferred = UnityRtlFlagInferer.infer(languages, "fa", 0b1100, resolver)
+        assertThat(inferred.status).isEqualTo(UnityRtlInferenceStatus.DETERMINED)
+        assertThat(inferred.bitMask).isEqualTo(0b0010)
+        assertThat(inferred.targetFlags).isEqualTo(0b1110)
+        assertThat(inferred.targetFlags!! and 0b1101).isEqualTo(0b1100)
+
+        val ambiguous = UnityRtlFlagInferer.infer(
+            listOf(
+                LocalizationLanguage("Left", "la-AA", 0),
+                LocalizationLanguage("Right", "ra-AA", 0b11),
+            ),
+            "fa",
+            0,
+            resolver,
+        )
+        assertThat(ambiguous.status).isEqualTo(UnityRtlInferenceStatus.AMBIGUOUS_BITS)
+        assertThat(ambiguous.targetFlags).isNull()
+
+        val blockedPlan = UnityLocalizationOperations.planAddLanguage(
+            sourceModel(singleTerm = true),
+            LocalizationLanguage("Target", "fa", 0),
+        ).copy(rtlFlagInference = ambiguous)
+        assertThat(blockedPlan.canApply).isFalse()
+        assertThat(blockedPlan.rtlFlagInference?.status)
+            .isEqualTo(UnityRtlInferenceStatus.AMBIGUOUS_BITS)
+    }
+
+    @Test
+    fun fontCoverageUsesActualPendingTargetAndSourceStrings() {
+        val source = sourceModel(singleTerm = true, english = "Hello", french = "ژ")
+        val tmp = UnityTmpFontAssetReport(
+            entryName = "fixture",
+            partIndex = 0,
+            pathId = 1,
+            name = "Static",
+            glyphCount = 4,
+            characterCount = 4,
+            populationModeRaw = 0,
+            populationMode = UnityFontPopulationMode.STATIC,
+            sourceFontFileId = 0,
+            sourceFontPathId = 0,
+            resolvedSourceFontName = null,
+            sourceFontSupportsArabic = false,
+            atlasTextureCount = 1,
+            atlasWidth = 64,
+            atlasHeight = 64,
+            coverage = UnicodeBlockCoverage(basicLatinCount = 4),
+            codepoints = "Helo".map { it.code }.toSet(),
+            statusReason = null,
+            capabilityStatement = "fixture",
+        )
+        val report = UnityFontReport(
+            inspectedEntries = 1,
+            tmpFontAssets = listOf(tmp),
+            rawFonts = emptyList(),
+            summaryStatement = "fixture",
+        )
+        val coverage = UnityTranslationFontCoverageEvaluator.evaluate(report, source, "fr", "en")
+        assertThat(coverage.targetCodepointCount).isEqualTo(1)
+        assertThat(coverage.sourceCodepointCount).isEqualTo(4)
+        assertThat(coverage.missingTargetCodepoints).containsExactly('ژ'.code)
+        assertThat(coverage.missingSourceCodepoints).isEmpty()
+        assertThat(coverage.complete).isFalse()
+
+        val dynamicWithoutExactCmap = report.copy(
+            tmpFontAssets = listOf(
+                tmp.copy(
+                    populationMode = UnityFontPopulationMode.DYNAMIC,
+                    populationModeRaw = 1,
+                    sourceFontSupportsArabic = true,
+                ),
+            ),
+        )
+        assertThat(
+            UnityTranslationFontCoverageEvaluator.evaluate(dynamicWithoutExactCmap, source, "fr", "en")
+                .missingTargetCodepoints,
+        ).containsExactly('ژ'.code)
+
+        val coveredReport = report.copy(tmpFontAssets = listOf(tmp.copy(codepoints = tmp.codepoints + 'ژ'.code)))
+        val covered = UnityTranslationFontCoverageEvaluator.evaluate(coveredReport, source, "fr", "en")
+        assertThat(covered.complete).isTrue()
+        assertThat(covered.missingCodepoints).isEmpty()
+    }
+
+    @Test
+    fun readinessBlocksMissingGlyphsAndEnablesExportOnlyAfterRoundTrip() {
+        val missing = UnityTranslationFontCoverage(
+            targetLanguageCode = "target",
+            targetCodepointCount = 1,
+            sourceCodepointCount = 0,
+            missingTargetCodepoints = listOf(0x0698),
+            missingSourceCodepoints = emptyList(),
+            inspectedTmpFontCount = 1,
+            inspectedRawFontCount = 0,
+        )
+        val blocked = UnityTranslationReadinessEvaluator.evaluate(
+            UnityTranslationReadinessInput(
+                tableSelected = true,
+                tableInspectionFailed = false,
+                targetLanguageSelected = true,
+                fontCoverage = missing,
+                compressionSupported = true,
+                roundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+            ),
+        )
+        assertThat(blocked.canExport).isFalse()
+        assertThat(blocked.checks.single { it.kind == UnityTranslationReadinessKind.FONT_COVERAGE }.status)
+            .isEqualTo(UnityTranslationReadinessStatus.BLOCKED)
+
+        val ready = UnityTranslationReadinessEvaluator.evaluate(
+            UnityTranslationReadinessInput(
+                tableSelected = true,
+                tableInspectionFailed = false,
+                targetLanguageSelected = true,
+                fontCoverage = missing.copy(missingTargetCodepoints = emptyList()),
+                compressionSupported = true,
+                compressionDetail = "LZ4",
+                roundTripStatus = UnityLocalizationRoundTripStatus.PASSED,
+            ),
+        )
+        assertThat(ready.canExport).isTrue()
+        assertThat(ready.nextAction).isEqualTo(UnityTranslationNextAction.EXPORT_OUTPUT)
+
+        val unsupportedCompression = UnityTranslationReadinessEvaluator.evaluate(
+            UnityTranslationReadinessInput(
+                tableSelected = true,
+                tableInspectionFailed = false,
+                targetLanguageSelected = true,
+                fontCoverage = missing.copy(missingTargetCodepoints = emptyList()),
+                compressionSupported = false,
+                compressionDetail = "unsupported",
+                roundTripStatus = UnityLocalizationRoundTripStatus.PASSED,
+            ),
+        )
+        assertThat(unsupportedCompression.canExport).isFalse()
+        assertThat(unsupportedCompression.checks.single { it.kind == UnityTranslationReadinessKind.COMPRESSION }.status)
+            .isEqualTo(UnityTranslationReadinessStatus.BLOCKED)
+
+        val needsTranslation = UnityTranslationReadinessEvaluator.evaluate(
+            UnityTranslationReadinessInput(
+                tableSelected = true,
+                tableInspectionFailed = false,
+                targetLanguageSelected = true,
+                fontCoverage = missing.copy(missingTargetCodepoints = emptyList()),
+                compressionSupported = true,
+                translationPending = false,
+                roundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+            ),
+        )
+        assertThat(needsTranslation.nextAction).isEqualTo(UnityTranslationNextAction.PREPARE_TRANSLATION)
+        val pending = UnityTranslationReadinessEvaluator.evaluate(
+            UnityTranslationReadinessInput(
+                tableSelected = true,
+                tableInspectionFailed = false,
+                targetLanguageSelected = true,
+                fontCoverage = missing.copy(missingTargetCodepoints = emptyList()),
+                compressionSupported = true,
+                translationPending = true,
+                roundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+            ),
+        )
+        assertThat(pending.nextAction).isEqualTo(UnityTranslationNextAction.VALIDATE_AND_STAGE)
+    }
+
+    @Test
+    fun signingHandoffRequiresAValidCertificateForEditedApks() {
+        assertThat(UnityApkSigningHandoffEvaluator.evaluate(false, false, 0))
+            .isEqualTo(UnityApkSigningHandoffState.NOT_APK)
+        assertThat(UnityApkSigningHandoffEvaluator.evaluate(true, false, 0))
+            .isEqualTo(UnityApkSigningHandoffState.SIGNING_REQUIRED)
+        assertThat(UnityApkSigningHandoffEvaluator.evaluate(true, true, 0))
+            .isEqualTo(UnityApkSigningHandoffState.SIGNING_REQUIRED)
+        assertThat(UnityApkSigningHandoffEvaluator.evaluate(true, true, 1))
+            .isEqualTo(UnityApkSigningHandoffState.VERIFIED_CERTIFICATE)
+    }
+
+    @Test
     fun embeddedBundleRoundTripDetectsAddsWritesRepacksAndReopens() {
         val root = Files.createTempDirectory("localization-e2e").toFile()
         try {
@@ -268,6 +681,12 @@ class UnityLocalizationWorkflowTest {
                 assertThat(found.sources).hasSize(1)
                 val updated = found.sources.single().addLanguage(LocalizationLanguage("Persian", "fa", 0))
                 document.writeLocalizationReplacement(entry, listOf(updated), replacement)
+                UnityBundleReader.open(replacement, File(root, "replacement-cache")).use { staged ->
+                    val stagedFound = staged.inspectLocalizations(staged.summary.entries.single())
+                        as UnityLocalizationInspection.Found
+                    assertThat(stagedFound.sources.single().languages.map { it.code })
+                        .containsExactly("en", "fr", "fa").inOrder()
+                }
                 document.repack(output, mapOf(entry.name to replacement))
             }
 
@@ -280,6 +699,119 @@ class UnityLocalizationWorkflowTest {
                 assertThat(table.terms.all { it.values.size == 3 }).isTrue()
                 assertThat(table.terms.map { it.values.last() }).containsExactly("", "")
             }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun standaloneGrowthFailureDeletesEveryUnpublishedOutput() {
+        val root = Files.createTempDirectory("localization-growth-abort").toFile()
+        try {
+            val serialized = writeLocalizationSerialized(root, "table.assets")
+            val bundle = writeFixtureBundle(root, "guard.bundle", serialized.readBytes(), "opaque")
+            val oversized = File(root, "oversized.bin").apply {
+                writeBytes(ByteArray(128 * 1024).also { Random(91).nextBytes(it) })
+            }
+            UnityBundleReader.open(bundle, File(root, "guard-cache")).use { document ->
+                assertThrows(UnityLocalizationSizeGuardException::class.java) {
+                    UnityPackageRepacker.repack(
+                        document,
+                        mapOf(document.summary.entries.single().name to oversized),
+                        emptyList(),
+                        File(root, "repack-cache"),
+                        1.25,
+                    )
+                }
+            }
+            assertThat(File(root, "guard-unity-edited.bundle").exists()).isFalse()
+            assertThat(root.listFiles().orEmpty().none { it.name.startsWith(".guard-unity-edited.bundle") }).isTrue()
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun localizationOverlayPreservesAnExistingStagedEntryWhileApplyingTableValues() {
+        val root = Files.createTempDirectory("localization-overlay").toFile()
+        try {
+            val serialized = writeLocalizationSerialized(root, "base.assets")
+            val bundle = writeFixtureBundle(root, "source.bundle", serialized.readBytes(), "opaque")
+            val desired = UnityBundleReader.open(bundle, File(root, "source-cache")).use { document ->
+                val found = document.inspectLocalizations(document.summary.entries.single())
+                    as UnityLocalizationInspection.Found
+                found.sources.single().addLanguage(LocalizationLanguage("Spanish", "es", 0))
+            }
+            val output = File(root, "overlay.assets")
+            UnityLocalizationOverlay.write(serialized, listOf(desired), output, File(root, "overlay-cache"))
+            assertThat(sha256(serialized)).isNotEqualTo(sha256(output))
+            UnityBundleReader.open(output, File(root, "verify-overlay")).use { document ->
+                val found = document.summary.entries.asSequence()
+                    .map { document.inspectLocalizations(it) }
+                    .filterIsInstance<UnityLocalizationInspection.Found>()
+                    .flatMap { it.sources.asSequence() }
+                    .single()
+                assertThat(found.languages.map { it.code }).containsExactly("en", "fr", "es").inOrder()
+            }
+        } finally {
+            root.deleteRecursively()
+        }
+    }
+
+    @Test
+    fun nestedApkRepackIsAtomicPreservesMethodAndPublishesEditedName() {
+        val root = Files.createTempDirectory("localization-apk-repack").toFile()
+        try {
+            val serialized = writeLocalizationSerialized(root, "table.assets")
+            val bundle = writeFixtureBundle(root, "source.bundle", serialized.readBytes(), "opaque")
+            val apk = File(root, "game.apk")
+            val padding = ByteArray(256 * 1024).also { Random(73).nextBytes(it) }
+            ZipOutputStream(FileOutputStream(apk)).use { zip ->
+                zip.putNextEntry(ZipEntry("assets/opaque.data"))
+                bundle.inputStream().use { it.copyTo(zip) }
+                zip.closeEntry()
+                zip.putNextEntry(ZipEntry("assets/padding.bin"))
+                zip.write(padding)
+                zip.closeEntry()
+            }
+            val originalHash = sha256(apk)
+            val originalMethod = ZipFile(apk).use { it.getEntry("assets/opaque.data").method }
+            val replacement = File(root, "replacement.data")
+            val output = UnityBundleReader.open(bundle, File(root, "open-cache")).use { document ->
+                val entry = document.summary.entries.single()
+                val table = (document.inspectLocalizations(entry) as UnityLocalizationInspection.Found)
+                    .sources.single()
+                document.writeLocalizationReplacement(
+                    entry,
+                    listOf(table.addLanguage(LocalizationLanguage("Third", "es", 0))),
+                    replacement,
+                )
+                UnityPackageRepacker.repack(
+                    document,
+                    mapOf(entry.name to replacement),
+                    listOf(ArchiveParent(apk.path, "assets/opaque.data")),
+                    File(root, "repack-cache"),
+                    1.25,
+                )
+            }
+            assertThat(output.name).isEqualTo("game-edited.apk")
+            assertThat(sha256(apk)).isEqualTo(originalHash)
+            ZipFile(output).use { zip ->
+                val edited = zip.getEntry("assets/opaque.data")
+                assertThat(edited).isNotNull()
+                assertThat(edited.method).isEqualTo(originalMethod)
+                val extracted = File(root, "edited.bundle")
+                zip.getInputStream(edited).use { input ->
+                    extracted.outputStream().use { input.copyTo(it) }
+                }
+                UnityBundleReader.open(extracted, File(root, "verify-cache")).use { document ->
+                    val found = document.inspectLocalizations(document.summary.entries.single())
+                        as UnityLocalizationInspection.Found
+                    assertThat(found.sources.single().languages.map { it.code })
+                        .containsExactly("en", "fr", "es").inOrder()
+                }
+            }
+            assertThat(root.listFiles().orEmpty().none { it.name.startsWith(".game-edited.apk") }).isTrue()
         } finally {
             root.deleteRecursively()
         }

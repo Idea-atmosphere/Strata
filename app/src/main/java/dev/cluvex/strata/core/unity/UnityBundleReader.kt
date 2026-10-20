@@ -169,6 +169,18 @@ class UnityBundleDocument internal constructor(
     /** Repacking is implemented for UnityFS bundles and serialized files; legacy containers are read-only. */
     val repackSupported: Boolean get() = summary.signature == "UnityFS" || serialized != null
 
+    /** Codec retained by a normalized rewrite; exposed for translation readiness without guessing. */
+    val repackCompressionLabel: String
+        get() = when {
+            serialized != null -> "SerializedFile"
+            unityFsProfile == null -> "Unavailable"
+            unityFsProfile.preferredCodec == 0 -> "None"
+            unityFsProfile.preferredCodec == 1 -> "LZMA (read); LZ4HC (write)"
+            unityFsProfile.preferredCodec == 2 -> "LZ4"
+            unityFsProfile.preferredCodec == 3 -> "LZ4HC"
+            else -> "Unsupported (${unityFsProfile.preferredCodec})"
+        }
+
     /** True when this document can contain editable serialized objects. Check individual entries too. */
     val supportsTextEditing: Boolean get() = serialized != null || summary.signature == "UnityFS"
 
