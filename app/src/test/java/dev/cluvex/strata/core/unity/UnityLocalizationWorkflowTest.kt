@@ -3,6 +3,7 @@ package dev.cluvex.strata.core.unity
 import com.google.common.truth.Truth.assertThat
 import dev.cluvex.strata.core.archive.ArchiveParent
 import dev.cluvex.strata.feature.unity.stagePickedApk
+import dev.cluvex.strata.feature.unity.writeLocalizationTsvDraft
 import org.apache.commons.compress.archivers.zip.ZipArchiveEntry
 import org.apache.commons.compress.archivers.zip.ZipArchiveOutputStream
 import org.junit.Assert.assertThrows
@@ -176,6 +177,37 @@ class UnityLocalizationWorkflowTest {
         )
         assertThat(malformed.issues.map { it.kind }).contains(LocalizationImportIssueKind.MALFORMED_ROW)
         assertThat(malformed.updated).isNull()
+    }
+
+    @Test
+    fun streamedTsvMatchesTheStringApiAndPublishesAnAtomicEditorDraft() {
+        val source = sourceModel()
+        val options = UnityTextTransformOptions(shapeArabic = true, reverseBidi = true)
+        val streamedAll = StringBuilder()
+        val streamedFrench = StringBuilder()
+
+        UnityLocalizationTsv.exportAllTo(streamedAll, source, options, "en")
+        UnityLocalizationTsv.exportLanguageTo(streamedFrench, source, "fr", options, "en")
+
+        assertThat(streamedAll.toString()).isEqualTo(UnityLocalizationTsv.exportAll(source, options, "en"))
+        assertThat(streamedFrench.toString()).isEqualTo(
+            UnityLocalizationTsv.exportLanguage(source, "fr", options, "en"),
+        )
+
+        val root = Files.createTempDirectory("localization-tsv-draft").toFile()
+        try {
+            val draft = writeLocalizationTsvDraft(root, source, "fr", options, "en")
+            assertThat(draft.isFile).isTrue()
+            assertThat(draft.extension).isEqualTo("tsv")
+            assertThat(draft.readText(Charsets.UTF_8)).isEqualTo(streamedFrench.toString())
+            assertThat(root.listFiles().orEmpty().any { it.name.endsWith(".tmp") }).isFalse()
+            assertThrows(IllegalArgumentException::class.java) {
+                writeLocalizationTsvDraft(root, source, "zz", options, "en")
+            }
+            assertThat(root.listFiles().orEmpty().any { it.name.endsWith(".tmp") }).isFalse()
+        } finally {
+            root.deleteRecursively()
+        }
     }
 
     @Test

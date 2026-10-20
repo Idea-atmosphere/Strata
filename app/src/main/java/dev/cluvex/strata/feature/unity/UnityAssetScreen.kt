@@ -58,7 +58,6 @@ import androidx.lifecycle.compose.collectAsStateWithLifecycle
 import androidx.lifecycle.viewmodel.compose.viewModel
 import dev.cluvex.strata.R
 import dev.cluvex.strata.core.archive.ArchiveParent
-import dev.cluvex.strata.core.model.FileItem
 import dev.cluvex.strata.core.open.IncomingPaths
 import dev.cluvex.strata.core.unity.LocalizationAddLanguagePlan
 import dev.cluvex.strata.core.unity.LocalizationImportPlan
@@ -100,7 +99,7 @@ fun UnityAssetScreen(
     refreshToken: Long,
     autoInspectLocalizations: Boolean = false,
     onBack: () -> Unit,
-    onOpenFile: (FileItem) -> Unit,
+    onEditTextFile: (String) -> Unit,
     onOpenNested: (File, List<ArchiveParent>) -> Unit,
     onOpenDiscoveryCandidate: (UnityLocalizationOpenRequest) -> Unit,
     onSignApk: (File) -> Unit,
@@ -139,10 +138,26 @@ fun UnityAssetScreen(
     LaunchedEffect(state.output?.path, state.outputNeedsSigning) {
         if (state.output != null && state.outputNeedsSigning) signPrompt = true
     }
-    LaunchedEffect(state.navigateTo) {
-        state.navigateTo?.let { target ->
-            vm.consumeNavigate()
-            onOpenFile(FileItem.of(File(target)))
+    LaunchedEffect(state.editorRequest?.id) {
+        state.editorRequest?.let { request ->
+            // Consume before changing routes so returning from the editor cannot replay the handoff.
+            vm.consumeEditorRequest(request.id)
+            val draft = File(request.path)
+            if (!draft.isFile || !draft.canRead()) {
+                vm.notifyMessage(context.getString(R.string.unity_staging_unavailable))
+            } else {
+                try {
+                    // Generated JSON/TSV drafts always belong in Strata's text editor. Bypassing
+                    // generic file resolution also avoids probing or external-app defaults here.
+                    onEditTextFile(draft.absolutePath)
+                } catch (error: Exception) {
+                    val detail = error.message?.takeIf { it.isNotBlank() }
+                    vm.notifyMessage(
+                        if (detail == null) context.getString(R.string.unity_operation_failed)
+                        else context.getString(R.string.unity_operation_failed_detail, detail),
+                    )
+                }
+            }
         }
     }
 

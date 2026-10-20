@@ -610,7 +610,7 @@ private fun Screen(
             refreshToken = refreshToken,
             autoInspectLocalizations = r.autoInspectLocalizations,
             onBack = actions.pop,
-            onOpenFile = actions.openFile,
+            onEditTextFile = { path -> actions.push(Route.Editor(path)) },
             onOpenNested = actions.openNestedFile,
             onOpenDiscoveryCandidate = { request ->
                 actions.push(Route.UnityAsset(request.file.path, request.parents, autoInspectLocalizations = true))

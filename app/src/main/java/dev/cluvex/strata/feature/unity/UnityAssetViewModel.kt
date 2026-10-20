@@ -75,6 +75,22 @@ import java.io.FileOutputStream
 import java.io.IOException
 import java.util.Locale
 
+/** One-shot request for a generated draft that must open in Strata's text editor. */
+data class UnityEditorRequest(
+    val id: Long,
+    val path: String,
+) {
+    init {
+        require(id > 0L) { "Unity editor request id must be positive" }
+        require(path.isNotBlank()) { "Unity editor request path must not be blank" }
+    }
+}
+
+internal fun consumeUnityEditorRequest(
+    current: UnityEditorRequest?,
+    consumedId: Long,
+): UnityEditorRequest? = current?.takeUnless { it.id == consumedId }
+
 data class UnityAssetUiState(
     val path: String = "",
     val loading: Boolean = true,
@@ -113,7 +129,7 @@ data class UnityAssetUiState(
     val discoveryScopeLabel: String? = null,
     val textTransformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
     val exportedTexts: Map<String, File> = emptyMap(),
-    val navigateTo: String? = null,
+    val editorRequest: UnityEditorRequest? = null,
     val output: File? = null,
     val outputSigningHandoff: UnityApkSigningHandoffState = UnityApkSigningHandoffState.NOT_APK,
     val message: String? = null,
@@ -166,6 +182,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
     private var textInspectionJob: Job? = null
     private var apkDiscoverySession: UnityLocalizationApkScanSession? = null
     private var discoveryJob: Job? = null
+    private var nextEditorRequestId = 0L
     @Volatile
     private var discoveryGeneration = 0L
     private val recognizedLocaleLanguages = Locale.getAvailableLocales()
@@ -799,11 +816,12 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                     Triple(file, texts.size, file.length() to file.lastModified())
                 }
                 exportedBaselines = exportedBaselines + (entry.name to result.third)
+                val editorRequest = newEditorRequest(result.first)
                 _state.update {
                     it.copy(
                         busy = false,
                         exportedTexts = it.exportedTexts + (entry.name to result.first),
-                        navigateTo = result.first.path,
+                        editorRequest = editorRequest,
                         message = getApplication<Application>().getString(R.string.unity_texts_exported, result.second),
                     )
                 }
@@ -938,22 +956,20 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val output = runInterruptible(Dispatchers.IO) {
-                    val tableTag = source.origin.tableId.hashCode().toUInt().toString(16)
-                    val languageTag = languageCode ?: "all"
-                    val file = File(dir, "localization-$tableTag-$languageTag.tsv")
-                    val text = if (languageCode == null) {
-                        UnityLocalizationTsv.exportAll(source, options, sourceCode)
-                    } else {
-                        UnityLocalizationTsv.exportLanguage(source, languageCode, options, sourceCode)
-                    }
-                    file.writeText(text, Charsets.UTF_8)
-                    file
+                    writeLocalizationTsvDraft(
+                        directory = dir,
+                        source = source,
+                        languageCode = languageCode,
+                        transformOptions = options,
+                        sourceLanguageCode = sourceCode,
+                    )
                 }
+                val editorRequest = newEditorRequest(output)
                 _state.update {
                     it.copy(
                         busy = false,
                         localizationTsv = output,
-                        navigateTo = output.path,
+                        editorRequest = editorRequest,
                         message = getApplication<Application>().getString(R.string.unity_localization_exported, output.path),
                     )
                 }
@@ -1237,8 +1253,17 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    fun consumeNavigate() {
-        _state.update { it.copy(navigateTo = null) }
+    private fun newEditorRequest(file: File): UnityEditorRequest {
+        if (!file.isFile || !file.canRead()) throw IOException("Generated editor draft is unavailable")
+        nextEditorRequestId = if (nextEditorRequestId == Long.MAX_VALUE) 1L else nextEditorRequestId + 1L
+        return UnityEditorRequest(nextEditorRequestId, file.absolutePath)
+    }
+
+    fun consumeEditorRequest(id: Long) {
+        _state.update { current ->
+            val remaining = consumeUnityEditorRequest(current.editorRequest, id)
+            if (remaining === current.editorRequest) current else current.copy(editorRequest = remaining)
+        }
     }
 
     fun refreshEditedFiles() {

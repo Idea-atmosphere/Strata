@@ -63,30 +63,53 @@ object UnityLocalizationTsv {
         source: LocalizationSource,
         transformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
         sourceLanguageCode: String = source.languages.first().code,
-    ): String = write(source, source.languages.map { it.code }, transformOptions, sourceLanguageCode)
+    ): String = buildString {
+        exportAllTo(this, source, transformOptions, sourceLanguageCode)
+    }
 
     fun exportLanguage(
         source: LocalizationSource,
         languageCode: String,
         transformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
         sourceLanguageCode: String = source.languages.first().code,
-    ): String {
+    ): String = buildString {
+        exportLanguageTo(this, source, languageCode, transformOptions, sourceLanguageCode)
+    }
+
+    /** Streams a complete table without first materializing a second full TSV string in memory. */
+    fun exportAllTo(
+        output: Appendable,
+        source: LocalizationSource,
+        transformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
+        sourceLanguageCode: String = source.languages.first().code,
+    ) {
+        write(output, source, source.languages.map { it.code }, transformOptions, sourceLanguageCode)
+    }
+
+    /** Streams one language and keeps the same metadata and escaping contract as [exportLanguage]. */
+    fun exportLanguageTo(
+        output: Appendable,
+        source: LocalizationSource,
+        languageCode: String,
+        transformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
+        sourceLanguageCode: String = source.languages.first().code,
+    ) {
         require(source.languageIndex(languageCode) >= 0) { "Unknown localization language '$languageCode'" }
-        return write(source, listOf(languageCode), transformOptions, sourceLanguageCode)
+        write(output, source, listOf(languageCode), transformOptions, sourceLanguageCode)
     }
 
     private fun write(
+        output: Appendable,
         source: LocalizationSource,
         languageCodes: List<String>,
         transformOptions: UnityTextTransformOptions,
         sourceLanguageCode: String,
-    ): String {
+    ) {
         require(source.languageIndex(sourceLanguageCode) >= 0) { "Unknown source language '$sourceLanguageCode'" }
         val indexes = languageCodes.map { code ->
             source.languageIndex(code).takeIf { it >= 0 }
                 ?: throw IllegalArgumentException("Unknown localization language '$code'")
         }
-        val output = StringBuilder()
         appendRow(
             output,
             listOf(
@@ -109,7 +132,6 @@ object UnityLocalizationTsv {
             }
             appendRow(output, cells)
         }
-        return output.toString()
     }
 
     fun planImport(
@@ -304,7 +326,7 @@ object UnityLocalizationTsv {
     private data class TsvOutCell(val value: String?, val explicitEmpty: Boolean)
     private data class TsvCell(val value: String, val quoted: Boolean)
 
-    private fun appendRow(output: StringBuilder, cells: List<TsvOutCell>) {
+    private fun appendRow(output: Appendable, cells: List<TsvOutCell>) {
         cells.forEachIndexed { index, cell ->
             if (index > 0) output.append('\t')
             val value = cell.value ?: return@forEachIndexed
