@@ -68,6 +68,8 @@ import kotlinx.coroutines.flow.asStateFlow
 import kotlinx.coroutines.flow.update
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
+import kotlinx.coroutines.sync.Mutex
+import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
@@ -87,6 +89,10 @@ data class UnityAssetUiState(
     val localizationReplacementEntries: Set<String> = emptySet(),
     val textInfos: Map<String, UnityTextInfo> = emptyMap(),
     val textIssues: Map<String, UnityTextUnavailableReason> = emptyMap(),
+    val textAutoInspectionRunning: Boolean = false,
+    val textAutoInspectionComplete: Boolean = false,
+    val textAutoInspectionScanned: Int = 0,
+    val textAutoInspectionTotal: Int = 0,
     val fontReports: Map<String, UnityFontReport> = emptyMap(),
     val localizationSources: Map<String, List<LocalizationSource>> = emptyMap(),
     val localizationIssues: Map<String, UnityTextUnavailableReason> = emptyMap(),
@@ -156,6 +162,8 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
     private var exportedBaselines: Map<String, Pair<Long, Long>> = emptyMap()
     private val inspectingNames = HashSet<String>()
     private val localizationInspectingNames = HashSet<String>()
+    private val textInspectionMutex = Mutex()
+    private var textInspectionJob: Job? = null
     private var apkDiscoverySession: UnityLocalizationApkScanSession? = null
     private var discoveryJob: Job? = null
     @Volatile
@@ -183,12 +191,17 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
     fun open(path: String, inspectLocalizations: Boolean = false) {
         val current = _state.value
         if (current.path == path && (current.loading || current.probe != null || current.error != null)) {
+            if (!current.loading && !current.textAutoInspectionComplete && !current.textAutoInspectionRunning) {
+                document?.let(::inspectAllTexts)
+            }
             if (inspectLocalizations && !current.loading && !current.localizationAutoInspectionComplete) {
                 inspectAllLocalizations()
             }
             return
         }
 
+        textInspectionJob?.cancel()
+        textInspectionJob = null
         document?.close()
         stageDir?.deleteRecursively()
         document = null
@@ -248,6 +261,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                         localizationSourceLanguageCode = firstSource?.languages?.firstOrNull()?.code,
                     )
                 }
+                parsed?.let(::inspectAllTexts)
             } catch (e: CancellationException) {
                 document?.close()
                 document = null
@@ -263,6 +277,89 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(loading = false, error = message) }
             }
         }
+    }
+
+    private fun inspectAllTexts(doc: UnityBundleDocument) {
+        if (document !== doc || _state.value.textAutoInspectionRunning) return
+        val entries = doc.summary.entries
+        _state.update {
+            it.copy(
+                textAutoInspectionRunning = entries.isNotEmpty(),
+                textAutoInspectionComplete = entries.isEmpty(),
+                textAutoInspectionScanned = 0,
+                textAutoInspectionTotal = entries.size,
+            )
+        }
+        if (entries.isEmpty()) return
+
+        textInspectionJob?.cancel()
+        textInspectionJob = viewModelScope.launch {
+            var completed = false
+            try {
+                for ((index, entry) in entries.withIndex()) {
+                    if (document !== doc) return@launch
+                    val name = entry.name
+                    val known = name in _state.value.textInfos || name in _state.value.textIssues
+                    if (known || !inspectingNames.add(name)) {
+                        _state.update { current ->
+                            current.copy(textAutoInspectionScanned = index + 1)
+                        }
+                        continue
+                    }
+                    try {
+                        val inspection = inspectText(doc, entry)
+                        if (document !== doc) return@launch
+                        _state.update { current ->
+                            when (inspection) {
+                                is UnityTextInspection.Editable -> current.copy(
+                                    textInfos = current.textInfos + (name to inspection.info),
+                                    textIssues = current.textIssues - name,
+                                    textAutoInspectionScanned = index + 1,
+                                )
+                                is UnityTextInspection.Unavailable -> current.copy(
+                                    textIssues = current.textIssues + (name to inspection.reason),
+                                    textInfos = current.textInfos - name,
+                                    textAutoInspectionScanned = index + 1,
+                                )
+                            }
+                        }
+                    } catch (error: CancellationException) {
+                        throw error
+                    } catch (error: UnityOperationCancelledException) {
+                        throw CancellationException(error.message).also { it.initCause(error) }
+                    } catch (error: Exception) {
+                        if (document !== doc) return@launch
+                        _state.update { current ->
+                            current.copy(
+                                textIssues = current.textIssues + (name to UnityTextUnavailableReason.DECODE_FAILED),
+                                textInfos = current.textInfos - name,
+                                textAutoInspectionScanned = index + 1,
+                            )
+                        }
+                    } finally {
+                        inspectingNames.remove(name)
+                    }
+                }
+                completed = true
+            } finally {
+                if (document === doc) {
+                    _state.update { current ->
+                        current.copy(
+                            textAutoInspectionRunning = false,
+                            textAutoInspectionComplete = completed,
+                            textAutoInspectionScanned = if (completed) entries.size else current.textAutoInspectionScanned,
+                        )
+                    }
+                }
+            }
+        }
+    }
+
+    private suspend fun inspectText(
+        doc: UnityBundleDocument,
+        entry: UnityBundleEntry,
+    ): UnityTextInspection = textInspectionMutex.withLock {
+        runInterruptible(Dispatchers.IO) { doc.inspectText(entry) }
     }
 
     private fun inspectAllLocalizations() {
@@ -614,7 +711,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         if (!inspectingNames.add(name)) return
         viewModelScope.launch {
             try {
-                val inspection = runInterruptible(Dispatchers.IO) { doc.inspectText(entry) }
+                val inspection = inspectText(doc, entry)
                 if (document !== doc) return@launch
                 _state.update { current ->
                     when (inspection) {
@@ -628,8 +725,19 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                         )
                     }
                 }
-            } catch (e: CancellationException) {
-                throw e
+            } catch (error: CancellationException) {
+                throw error
+            } catch (error: UnityOperationCancelledException) {
+                throw CancellationException(error.message).also { it.initCause(error) }
+            } catch (error: Exception) {
+                if (document === doc) {
+                    _state.update { current ->
+                        current.copy(
+                            textIssues = current.textIssues + (name to UnityTextUnavailableReason.DECODE_FAILED),
+                            textInfos = current.textInfos - name,
+                        )
+                    }
+                }
             } finally {
                 inspectingNames.remove(name)
             }
@@ -1409,6 +1517,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     override fun onCleared() {
+        textInspectionJob?.cancel()
         document?.close()
         stageDir?.deleteRecursively()
         releaseApkDiscoverySession()

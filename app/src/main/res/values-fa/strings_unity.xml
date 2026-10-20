@@ -117,4 +117,5 @@
     <string name="unity_rtl_flag_determined">پرچم RTL در %1$s استنتاج شد؛ پرچم‌های مقصد: %2$d.</string>
     <string name="unity_rtl_flag_not_determined">پرچم RTL از این جدول قابل تعیین نیست؛ هیچ بیتی حدس زده نشد.</string>
     <string name="unity_sign_missing_certificate">APK ویرایش‌شده گواهی امضای تأییدشده ندارد. پیش از نصب، مرحلهٔ امضا را انجام دهید.</string>
+    <string name="unity_text_auto_inspection_progress">در حال شناسایی محتوای ورودی‌ها… %1$d از %2$d</string>
 </resources>

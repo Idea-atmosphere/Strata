@@ -119,4 +119,5 @@
     <string name="unity_rtl_flag_determined">Флаг RTL определён как %1$s; флаги языка: %2$d.</string>
     <string name="unity_rtl_flag_not_determined">Флаг RTL нельзя определить по этой таблице; значение не угадывалось.</string>
     <string name="unity_sign_missing_certificate">У изменённого APK нет подтверждённого сертификата. Перед установкой передайте его на подпись.</string>
+    <string name="unity_text_auto_inspection_progress">Определение содержимого записей… %1$d/%2$d</string>
 </resources>

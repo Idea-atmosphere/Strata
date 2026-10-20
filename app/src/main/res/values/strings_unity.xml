@@ -117,4 +117,5 @@
     <string name="unity_rtl_flag_determined">RTL flag inferred at %1$s; target flags: %2$d.</string>
     <string name="unity_rtl_flag_not_determined">RTL flag could not be determined from this table; no bit was guessed.</string>
     <string name="unity_sign_missing_certificate">The edited APK has no verified signing certificate. Continue to the signing handoff before installation.</string>
+    <string name="unity_text_auto_inspection_progress">Identifying entry contents… %1$d/%2$d</string>
 </resources>

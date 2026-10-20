@@ -18,7 +18,6 @@ import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
-import androidx.compose.foundation.lazy.itemsIndexed
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.automirrored.rounded.ArrowBack
@@ -29,6 +28,7 @@ import androidx.compose.material3.Checkbox
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
@@ -89,6 +89,9 @@ import kotlinx.coroutines.runInterruptible
 import kotlinx.coroutines.withContext
 import java.io.File
 import java.io.IOException
+
+internal fun toggleUnityEntrySelection(current: String?, tapped: String): String? =
+    tapped.takeUnless { it == current }
 
 @Composable
 fun UnityAssetScreen(
@@ -310,129 +313,149 @@ fun UnityAssetScreen(
                     } else {
                         Text(stringResource(R.string.unity_output_copy_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
                     }
-                    Row(
-                        Modifier.fillMaxWidth().padding(bottom = 6.dp),
-                        horizontalArrangement = Arrangement.spacedBy(6.dp),
-                    ) {
-                        OutlinedButton(
-                            onClick = { folderPicker.launch(null) },
-                            enabled = !busy && !state.discoveryRunning,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text(stringResource(R.string.unity_discovery_pick_folder), maxLines = 1)
-                        }
-                        OutlinedButton(
-                            onClick = {
-                                apkPicker.launch(
-                                    arrayOf("application/vnd.android.package-archive", "application/zip"),
-                                )
-                            },
-                            enabled = !busy && !state.discoveryRunning,
-                            modifier = Modifier.weight(1f),
-                        ) {
-                            Text(stringResource(R.string.unity_discovery_scan_apk), maxLines = 1)
-                        }
-                    }
                     if (document.summary.entries.isEmpty()) {
                         Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
                             Text(stringResource(R.string.unity_no_entries), color = MaterialTheme.colorScheme.onSurfaceVariant)
                         }
                     } else {
-                        LazyColumn(Modifier.weight(1f).fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(4.dp)) {
-                            itemsIndexed(document.summary.entries, key = { index, entry -> "$index:${entry.name}" }) { index, entry ->
-                                UnityEntryRow(
-                                    index = index,
-                                    entry = entry,
-                                    selected = state.selectedName == entry.name,
-                                    modified = entry.name in state.replacements || entry.name in state.editedFiles,
-                                    textInfo = state.textInfos[entry.name],
-                                    textIssue = state.textIssues[entry.name],
-                                    onClick = { vm.select(entry.name) },
-                                )
+                        LazyColumn(
+                            Modifier.weight(1f).fillMaxWidth(),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            if (state.textAutoInspectionRunning) {
+                                item(key = "text-auto-inspection-progress") {
+                                    Column(
+                                        Modifier.fillMaxWidth().padding(vertical = 4.dp),
+                                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                                    ) {
+                                        Text(
+                                            stringResource(
+                                                R.string.unity_text_auto_inspection_progress,
+                                                state.textAutoInspectionScanned,
+                                                state.textAutoInspectionTotal,
+                                            ),
+                                            style = MaterialTheme.typography.labelSmall,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        )
+                                        val fraction = state.textAutoInspectionScanned.toFloat() /
+                                            state.textAutoInspectionTotal.coerceAtLeast(1).toFloat()
+                                        LinearProgressIndicator(
+                                            progress = { fraction.coerceIn(0f, 1f) },
+                                            modifier = Modifier.fillMaxWidth(),
+                                        )
+                                    }
+                                }
+                            }
+                            document.summary.entries.forEachIndexed { index, entry ->
+                                val selected = state.selectedName == entry.name
+                                item(key = "entry:$index:${entry.name}") {
+                                    UnityEntryRow(
+                                        index = index,
+                                        entry = entry,
+                                        selected = selected,
+                                        modified = entry.name in state.replacements || entry.name in state.editedFiles,
+                                        textInfo = state.textInfos[entry.name],
+                                        onClick = {
+                                            vm.select(toggleUnityEntrySelection(state.selectedName, entry.name))
+                                        },
+                                    )
+                                }
+                                if (selected) {
+                                    item(key = "entry-actions:$index:${entry.name}") {
+                                        Column(Modifier.fillMaxWidth()) {
+                                            UnityEntryActions(
+                                                entry = entry,
+                                                busy = busy,
+                                                onCollapse = { vm.select(null) },
+                                                onOpen = {
+                                                    scope.launch {
+                                                        try {
+                                                            val staged = vm.fileFor(entry)
+                                                            onOpenNested(
+                                                                staged,
+                                                                parents + ArchiveParent(document.source.path, entry.name),
+                                                            )
+                                                        } catch (_: Exception) {
+                                                            vm.notifyMessage(
+                                                                context.getString(R.string.unity_operation_failed),
+                                                            )
+                                                        }
+                                                    }
+                                                },
+                                                onExport = { exportPicker.launch(entry.displayName) },
+                                                onReplace = { replacePicker.launch(arrayOf("*/*")) },
+                                                onExportTexts = if (state.textInfos.containsKey(entry.name)) {
+                                                    { vm.exportTexts(entry) }
+                                                } else {
+                                                    null
+                                                },
+                                                onInspectFonts = { vm.inspectFonts(entry) },
+                                                onBindDynamicFont = {
+                                                    val estimate = vm.estimateRewrite()
+                                                    if (estimate != null) {
+                                                        fontRewritePrompt = estimate
+                                                    } else {
+                                                        fontTtfPicker.launch(arrayOf("*/*"))
+                                                    }
+                                                },
+                                                fontReport = state.fontReports[entry.name],
+                                                textTransformOptions = state.textTransformOptions,
+                                                onToggleShapeArabic = vm::setShapeArabic,
+                                                onToggleReverseBidi = vm::setReverseBidi,
+                                                textIssue = state.textIssues[entry.name],
+                                            )
+                                            LocalizationActions(
+                                                busy = busy,
+                                                sources = state.localizationSources[entry.name].orEmpty(),
+                                                selected = selectedLocalization?.takeIf {
+                                                    it.origin.entryName == entry.name
+                                                },
+                                                sourceLanguageCode = state.localizationSourceLanguageCode,
+                                                targetLanguageCode = state.localizationTargetLanguageCode,
+                                                rtlInference = state.rtlFlagInference,
+                                                fontCoverage = state.fontCoverage,
+                                                readiness = state.translationReadiness,
+                                                canValidateAndStage = state.canValidateAndStageLocalization,
+                                                addPlan = state.localizationAddPlan,
+                                                importPlan = state.localizationImportPlan,
+                                                hasTsv = state.localizationTsv?.isFile == true,
+                                                textTransformOptions = state.textTransformOptions,
+                                                onToggleShapeArabic = vm::setShapeArabic,
+                                                onToggleReverseBidi = vm::setReverseBidi,
+                                                onFind = { vm.inspectLocalizations(entry) },
+                                                onDiscoverSource = { showDiscovery = true },
+                                                onSelectTable = vm::selectLocalizationTable,
+                                                onSelectSourceLanguage = vm::setLocalizationSourceLanguage,
+                                                onSelectTargetLanguage = vm::setLocalizationTargetLanguage,
+                                                onInspectFont = {
+                                                    if (state.fontCoverage == null) {
+                                                        vm.inspectFonts(entry)
+                                                    } else {
+                                                        val estimate = vm.estimateRewrite()
+                                                        if (estimate != null) {
+                                                            fontRewritePrompt = estimate
+                                                        } else {
+                                                            fontTtfPicker.launch(arrayOf("*/*"))
+                                                        }
+                                                    }
+                                                },
+                                                onExportPackage = { vm.repack(parents) },
+                                                onExportAll = { vm.exportLocalization() },
+                                                onExportLanguage = vm::exportLocalization,
+                                                onAddLanguage = {
+                                                    newLanguageName = ""
+                                                    newLanguageCode = ""
+                                                    addLanguagePrompt = true
+                                                },
+                                                onValidateImport = vm::planLocalizationImport,
+                                                onApply = { vm.applyLocalizationPlan(entry) },
+                                            )
+                                        }
+                                    }
+                                }
                             }
                         }
                     }
-                    selectedEntry?.let { entry ->
-                        UnityEntryActions(
-                            entry = entry,
-                            busy = busy,
-                            onOpen = {
-                                scope.launch {
-                                    try {
-                                        val staged = vm.fileFor(entry)
-                                        onOpenNested(
-                                            staged,
-                                            parents + ArchiveParent(document.source.path, entry.name),
-                                        )
-                                    } catch (_: Exception) {
-                                        vm.notifyMessage(context.getString(R.string.unity_operation_failed))
-                                    }
-                                }
-                            },
-                            onExport = { exportPicker.launch(entry.displayName) },
-                            onReplace = { replacePicker.launch(arrayOf("*/*")) },
-                            onExportTexts = if (state.textInfos.containsKey(entry.name)) {
-                                { vm.exportTexts(entry) }
-                            } else {
-                                null
-                            },
-                            onInspectFonts = { vm.inspectFonts(entry) },
-                            onBindDynamicFont = {
-                                val estimate = vm.estimateRewrite()
-                                if (estimate != null) {
-                                    fontRewritePrompt = estimate
-                                } else {
-                                    fontTtfPicker.launch(arrayOf("*/*"))
-                                }
-                            },
-                            fontReport = state.fontReports[entry.name],
-                            textTransformOptions = state.textTransformOptions,
-                            onToggleShapeArabic = vm::setShapeArabic,
-                            onToggleReverseBidi = vm::setReverseBidi,
-                            textIssue = state.textIssues[entry.name],
-                        )
-                        LocalizationActions(
-                            busy = busy,
-                            sources = state.localizationSources[entry.name].orEmpty(),
-                            selected = selectedLocalization?.takeIf { it.origin.entryName == entry.name },
-                            sourceLanguageCode = state.localizationSourceLanguageCode,
-                            targetLanguageCode = state.localizationTargetLanguageCode,
-                            rtlInference = state.rtlFlagInference,
-                            fontCoverage = state.fontCoverage,
-                            readiness = state.translationReadiness,
-                            canValidateAndStage = state.canValidateAndStageLocalization,
-                            addPlan = state.localizationAddPlan,
-                            importPlan = state.localizationImportPlan,
-                            hasTsv = state.localizationTsv?.isFile == true,
-                            textTransformOptions = state.textTransformOptions,
-                            onToggleShapeArabic = vm::setShapeArabic,
-                            onToggleReverseBidi = vm::setReverseBidi,
-                            onFind = { vm.inspectLocalizations(entry) },
-                            onDiscoverSource = { showDiscovery = true },
-                            onSelectTable = vm::selectLocalizationTable,
-                            onSelectSourceLanguage = vm::setLocalizationSourceLanguage,
-                            onSelectTargetLanguage = vm::setLocalizationTargetLanguage,
-                            onInspectFont = {
-                                if (state.fontCoverage == null) {
-                                    vm.inspectFonts(entry)
-                                } else {
-                                    val estimate = vm.estimateRewrite()
-                                    if (estimate != null) fontRewritePrompt = estimate
-                                    else fontTtfPicker.launch(arrayOf("*/*"))
-                                }
-                            },
-                            onExportPackage = { vm.repack(parents) },
-                            onExportAll = { vm.exportLocalization() },
-                            onExportLanguage = vm::exportLocalization,
-                            onAddLanguage = {
-                                newLanguageName = ""
-                                newLanguageCode = ""
-                                addLanguagePrompt = true
-                            },
-                            onValidateImport = vm::planLocalizationImport,
-                            onApply = { vm.applyLocalizationPlan(entry) },
-                        )
-                    } ?: Text(stringResource(R.string.unity_select_entry), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(vertical = 8.dp))
 
                     val changedCount = state.replacements.size + state.editedFiles.keys.count { it !in state.replacements }
                     if (changedCount > 0) {
@@ -606,7 +629,6 @@ private fun UnityEntryRow(
     selected: Boolean,
     modified: Boolean,
     textInfo: UnityTextInfo? = null,
-    textIssue: UnityTextUnavailableReason? = null,
     onClick: () -> Unit,
 ) {
     Surface(
@@ -626,14 +648,6 @@ private fun UnityEntryRow(
                         maxLines = 1,
                         overflow = TextOverflow.Ellipsis,
                     )
-                } else if (textIssue != null) {
-                    Text(
-                        unityTextIssueLabel(textIssue),
-                        style = MaterialTheme.typography.labelSmall,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        maxLines = 1,
-                        overflow = TextOverflow.Ellipsis,
-                    )
                 } else {
                     Text(isolated(entry.name), style = MaterialTheme.typography.labelSmall, color = MaterialTheme.colorScheme.onSurfaceVariant, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
@@ -650,6 +664,7 @@ private fun UnityEntryRow(
 private fun UnityEntryActions(
     entry: UnityBundleEntry,
     busy: Boolean,
+    onCollapse: () -> Unit,
     onOpen: () -> Unit,
     onExport: () -> Unit,
     onReplace: () -> Unit,
@@ -664,7 +679,18 @@ private fun UnityEntryActions(
 ) {
     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
         Column(Modifier.padding(12.dp)) {
-            Text(isolated(entry.name), style = MaterialTheme.typography.labelMedium, maxLines = 2, overflow = TextOverflow.Ellipsis)
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    isolated(entry.name),
+                    style = MaterialTheme.typography.labelMedium,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                    modifier = Modifier.weight(1f),
+                )
+                TextButton(onClick = onCollapse, enabled = !busy) {
+                    Text(stringResource(R.string.common_close))
+                }
+            }
             Text(stringResource(R.string.unity_entry_size, Formatters.size(entry.size)), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             Text(stringResource(R.string.unity_entry_flags, "0x${entry.flags.toString(16).uppercase().padStart(8, '0')}"), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
             if (textIssue != null) {

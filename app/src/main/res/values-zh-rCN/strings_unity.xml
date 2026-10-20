@@ -116,4 +116,5 @@
     <string name="unity_rtl_flag_determined">已从 %1$s 推断 RTL 标志；目标标志：%2$d。</string>
     <string name="unity_rtl_flag_not_determined">无法从此表确定 RTL 标志；未猜测任何位。</string>
     <string name="unity_sign_missing_certificate">编辑后的 APK 没有已验证的签名证书。安装前请继续完成签名。</string>
+    <string name="unity_text_auto_inspection_progress">正在识别条目内容… %1$d/%2$d</string>
 </resources>
