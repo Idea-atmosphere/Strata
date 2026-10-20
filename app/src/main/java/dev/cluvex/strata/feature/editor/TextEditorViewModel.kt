@@ -19,6 +19,7 @@ import dev.cluvex.strata.core.text.TextFormat
 import dev.cluvex.strata.core.text.TextPage
 import dev.cluvex.strata.core.text.TextPager
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.async
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
@@ -44,6 +45,8 @@ data class EditorUiState(
     val bom: Boolean = false,
     val lineEnding: LineEnding = LineEnding.LF,
     val language: EditorLanguage? = null,
+    val syntaxHighlightingAvailable: Boolean? = null,
+    val syntaxRevision: Int = 0,
     val decodedResource: String? = null,
     val binaryXml: Boolean = false,
     val loadSeq: Int = 0,
@@ -74,6 +77,8 @@ class TextEditorViewModel(app: Application) : AndroidViewModel(app) {
     private var pages: List<TextPage> = emptyList()
     private val tracker = EditTracker()
     private var userReadOnly = false
+    private var languageOverridden = false
+    private var suggestedLanguageName: String? = null
 
     fun takeText(): String? = pendingText.also { pendingText = null }
 
@@ -88,13 +93,34 @@ class TextEditorViewModel(app: Application) : AndroidViewModel(app) {
             return
         }
         viewModelScope.launch {
-            _state.update { EditorUiState(path = path, name = File(path).name, loading = true, loadSeq = it.loadSeq) }
+            val syntaxAvailable = when {
+                TextMateEngine.isReady -> true
+                TextMateEngine.unavailableCause != null -> false
+                else -> null
+            }
+            _state.update {
+                EditorUiState(
+                    path = path,
+                    name = File(path).name,
+                    loading = true,
+                    loadSeq = it.loadSeq,
+                    syntaxHighlightingAvailable = syntaxAvailable,
+                    syntaxRevision = it.syntaxRevision,
+                )
+            }
             pages = emptyList()
             tracker.reset("", TextFormat(Charsets.UTF_8, false, LineEnding.LF))
             userReadOnly = false
+            languageOverridden = false
+            suggestedLanguageName = null
+
+            // Syntax initialization runs independently: file IO, decoding and save eligibility do
+            // not wait for the optional TextMate service-provider graph.
+            val syntaxInitialization = async(Dispatchers.Default) {
+                TextMateEngine.init(getApplication())
+            }
             val result = runCatching {
                 withContext(Dispatchers.IO) {
-                    TextMateEngine.init(getApplication())
                     val local = File(path)
                     val a = if (local.canRead() && (local.canWrite() || !rootEnabled)) LocalFileAccess else RootManager.access() ?: LocalFileAccess
                     access = a
@@ -125,6 +151,37 @@ class TextEditorViewModel(app: Application) : AndroidViewModel(app) {
             }.onFailure { e ->
                 _state.update { it.copy(loading = false, readOnly = true, message = e.message ?: tr(R.string.editor_cant_open_file)) }
             }
+            finishSyntaxInitialization(path, syntaxInitialization.await())
+        }
+    }
+
+    private fun finishSyntaxInitialization(path: String, status: OptionalFeatureState) {
+        if (_state.value.path != path) return
+        when (status) {
+            OptionalFeatureState.Uninitialized -> Unit
+            OptionalFeatureState.Ready -> {
+                val inferred = if (languageOverridden) null else {
+                    suggestedLanguageName?.let(TextMateEngine::languageNamed)
+                        ?: TextMateEngine.languageFor(File(path).name)
+                }
+                _state.update {
+                    it.copy(
+                        syntaxHighlightingAvailable = true,
+                        syntaxRevision = it.syntaxRevision + 1,
+                        language = if (languageOverridden) it.language else inferred,
+                    )
+                }
+            }
+            is OptionalFeatureState.Unavailable -> {
+                _state.update {
+                    it.copy(
+                        syntaxHighlightingAvailable = false,
+                        syntaxRevision = it.syntaxRevision + 1,
+                        language = null,
+                        message = it.message ?: tr(R.string.unity_editor_plain_text_fallback),
+                    )
+                }
+            }
         }
     }
 
@@ -132,6 +189,7 @@ class TextEditorViewModel(app: Application) : AndroidViewModel(app) {
         val bytes = loaded.bytes
         val resource = if (charset == null) decodeBinaryResource(path, bytes) else null
         if (resource != null) {
+            suggestedLanguageName = resource.language
             pendingText = resource.text
             tracker.reset(resource.text, TextFormat(Charsets.UTF_8, false, LineEnding.LF))
             val editable = resource.binaryXml && loaded.writable
@@ -139,7 +197,7 @@ class TextEditorViewModel(app: Application) : AndroidViewModel(app) {
                 it.copy(
                     loading = false, writable = editable, readOnly = !editable, binary = false, binaryXml = resource.binaryXml,
                     charset = Charsets.UTF_8, bom = false, lineEnding = LineEnding.LF,
-                    language = resource.language?.let { l -> TextMateEngine.catalog.language(l) },
+                    language = resource.language?.let(TextMateEngine::languageNamed),
                     decodedResource = resource.label,
                     size = loaded.size, dirty = false, externallyModified = false,
                     loadSeq = it.loadSeq + 1,
@@ -159,7 +217,7 @@ class TextEditorViewModel(app: Application) : AndroidViewModel(app) {
                 charset = decoded.charset,
                 bom = decoded.bom,
                 lineEnding = decoded.lineEnding,
-                language = TextMateEngine.catalog.languageFor(File(path).name),
+                language = TextMateEngine.languageFor(File(path).name),
                 decodedResource = null,
                 binaryXml = false,
                 size = loaded.size,
@@ -185,7 +243,7 @@ class TextEditorViewModel(app: Application) : AndroidViewModel(app) {
                 charset = p.charset,
                 bom = p.bom,
                 lineEnding = lineEnding,
-                language = TextMateEngine.catalog.languageFor(File(path).name),
+                language = TextMateEngine.languageFor(File(path).name),
                 decodedResource = null,
                 binaryXml = false,
                 size = p.size,
@@ -273,7 +331,23 @@ class TextEditorViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(readOnly = on || !it.writable || it.pageLossy) }
     }
 
-    fun setLanguage(language: EditorLanguage?) = _state.update { it.copy(language = language) }
+    fun setLanguage(language: EditorLanguage?) {
+        languageOverridden = true
+        _state.update { it.copy(language = language) }
+    }
+
+    fun reportSyntaxUnavailable() {
+        _state.update {
+            if (it.syntaxHighlightingAvailable == false) it else {
+                it.copy(
+                    syntaxHighlightingAvailable = false,
+                    syntaxRevision = it.syntaxRevision + 1,
+                    language = null,
+                    message = it.message ?: tr(R.string.unity_editor_plain_text_fallback),
+                )
+            }
+        }
+    }
 
     fun setLineEnding(ending: LineEnding) {
         _state.update { it.copy(lineEnding = ending) }

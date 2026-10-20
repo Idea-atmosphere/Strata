@@ -18,6 +18,7 @@
     <string name="editor_line_range">行号（%1$d–%2$d）</string>
     <string name="editor_syntax">语法</string>
     <string name="editor_plain_text">纯文本</string>
+    <string name="unity_editor_plain_text_fallback">语法高亮不可用；文件已以纯文本方式打开。</string>
     <string name="editor_theme">编辑器主题</string>
     <string name="editor_theme_auto">自动（跟随应用）</string>
     <string name="editor_line_endings">换行符</string>

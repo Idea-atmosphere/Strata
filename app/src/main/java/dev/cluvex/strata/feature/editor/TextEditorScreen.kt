@@ -112,7 +112,6 @@ import dev.cluvex.strata.ui.expressive.ArtTone
 import dev.cluvex.strata.ui.expressive.ExpressiveDialog
 import dev.cluvex.strata.ui.expressive.HeroShapes
 import io.github.rosemoe.sora.lang.EmptyLanguage
-import io.github.rosemoe.sora.langs.textmate.registry.ThemeRegistry
 import java.nio.charset.Charset
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
@@ -207,23 +206,35 @@ fun TextEditorScreen(
     }
     val dark = isDarkBackground(colors.surface)
     val themeId = if (prefs.theme == "auto") autoThemeId(dark) else prefs.theme
-    LaunchedEffect(themeId, prefs.theme == "auto", colors, controller.editor) {
+    LaunchedEffect(themeId, prefs.theme == "auto", colors, state.syntaxRevision, controller.editor) {
         if (controller.editor == null) return@LaunchedEffect
-        withContext(Dispatchers.Default) { TextMateEngine.init(context) }
-        val chrome = if (prefs.theme == "auto") EditorChrome.from(colors) else null
-        onMain {
-            val model = runCatching { TextMateEngine.activateTheme(themeId) }.getOrNull() ?: return@onMain
-            controller.setColorScheme(StrataColorScheme(ThemeRegistry.getInstance(), model, chrome))
+        val availability = withContext(Dispatchers.Default) { TextMateEngine.init(context) }
+        if (availability !is OptionalFeatureState.Ready) {
+            vm.reportSyntaxUnavailable()
+            return@LaunchedEffect
         }
+        val chrome = if (prefs.theme == "auto") EditorChrome.from(colors) else null
+        val model = withContext(Dispatchers.Default) { TextMateEngine.activateTheme(themeId) }
+        if (model == null) {
+            if (!TextMateEngine.isReady) vm.reportSyntaxUnavailable()
+            return@LaunchedEffect
+        }
+        val scheme = withContext(Dispatchers.Default) { TextMateEngine.colorScheme(model, chrome) }
+        if (scheme == null) {
+            vm.reportSyntaxUnavailable()
+            return@LaunchedEffect
+        }
+        onMain { controller.setColorScheme(scheme) }
     }
-    LaunchedEffect(state.language?.scopeName, controller.editor) {
+    LaunchedEffect(state.language?.scopeName, state.syntaxRevision, controller.editor) {
         if (controller.editor == null) return@LaunchedEffect
         val scope = state.language?.scopeName
-        val language = if (scope == null) {
+        val language = if (scope == null || !TextMateEngine.isReady) {
             EmptyLanguage()
         } else {
-            withContext(Dispatchers.Default) { runCatching { TextMateEngine.language(scope) }.getOrNull() } ?: EmptyLanguage()
+            withContext(Dispatchers.Default) { TextMateEngine.language(scope) } ?: EmptyLanguage()
         }
+        if (scope != null && !TextMateEngine.isReady) vm.reportSyntaxUnavailable()
         onMain { controller.setLanguage(language) }
     }
     LaunchedEffect(prefs.wordWrap, controller.editor) { onMain { controller.setWordWrap(prefs.wordWrap) } }
@@ -418,7 +429,7 @@ fun TextEditorScreen(
             val plainText = stringResource(R.string.editor_plain_text)
             ChoiceDialog(
                 title = stringResource(R.string.editor_syntax),
-                options = listOf<EditorLanguage?>(null) + TextMateEngine.catalog.languages,
+                options = listOf<EditorLanguage?>(null) + TextMateEngine.languages,
                 selected = state.language,
                 label = { it?.label ?: plainText },
                 onSelect = { vm.setLanguage(it); dialog = EditorDialog.None },

@@ -18,6 +18,7 @@
     <string name="editor_line_range">Строка (%1$d–%2$d)</string>
     <string name="editor_syntax">Синтаксис</string>
     <string name="editor_plain_text">Обычный текст</string>
+    <string name="unity_editor_plain_text_fallback">Подсветка синтаксиса недоступна; файл открыт как обычный текст.</string>
     <string name="editor_theme">Тема редактора</string>
     <string name="editor_theme_auto">Авто (как в приложении)</string>
     <string name="editor_line_endings">Концы строк</string>

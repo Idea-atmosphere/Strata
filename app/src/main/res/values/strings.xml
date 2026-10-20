@@ -16,6 +16,7 @@
     <string name="unity_localization_preview">Preview</string>
     <string name="unity_localization_add_preview">Dry run: %1$d terms, about %2$d data bytes</string>
     <string name="unity_localization_validate_import">Validate TSV</string>
+    <string name="unity_localization_import_tsv">Import edited TSV</string>
     <string name="unity_localization_import_preview">Dry run: %1$d changes · %2$d unknown · %3$d missing · %4$d empty · %5$d placeholder errors</string>
     <string name="unity_localization_apply">Apply</string>
     <string name="unity_localization_applied">Localization changes were staged and verified</string>

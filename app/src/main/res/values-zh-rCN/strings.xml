@@ -15,6 +15,7 @@
     <string name="unity_localization_preview">预览</string>
     <string name="unity_localization_add_preview">试运行：%1$d 个词条，约 %2$d 个数据字节</string>
     <string name="unity_localization_validate_import">验证 TSV</string>
+    <string name="unity_localization_import_tsv">导入已编辑的 TSV</string>
     <string name="unity_localization_import_preview">试运行：%1$d 项更改 · %2$d 个未知 · %3$d 个缺失 · %4$d 个空值 · %5$d 个占位符错误</string>
     <string name="unity_localization_apply">应用</string>
     <string name="unity_localization_applied">本地化更改已暂存并验证</string>

@@ -17,10 +17,19 @@ class UnityAssetSelectionTest {
 
     @Test
     fun editorHandoffIsConsumedOnceWithoutClearingANewerRequest() {
-        val first = UnityEditorRequest(1L, "/cache/first.tsv")
-        val second = UnityEditorRequest(2L, "/cache/second.tsv")
+        val first = UnityEditorRequest(1L, "/cache/first.json")
+        val second = UnityEditorRequest(2L, "/cache/second.json")
 
         assertThat(consumeUnityEditorRequest(first, 1L)).isNull()
         assertThat(consumeUnityEditorRequest(second, 1L)).isSameInstanceAs(second)
+    }
+
+    @Test
+    fun tsvDocumentHandoffIsConsumedOnceWithoutClearingANewerRequest() {
+        val first = UnityTsvExportRequest(3L, "first.tsv")
+        val second = UnityTsvExportRequest(4L, "second.tsv")
+
+        assertThat(consumeUnityTsvExportRequest(first, 3L)).isNull()
+        assertThat(consumeUnityTsvExportRequest(second, 3L)).isSameInstanceAs(second)
     }
 }

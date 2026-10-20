@@ -18,6 +18,7 @@
     <string name="editor_line_range">خط (%1$d تا %2$d)</string>
     <string name="editor_syntax">نحو</string>
     <string name="editor_plain_text">متن ساده</string>
+    <string name="unity_editor_plain_text_fallback">برجسته‌سازی نحوی در دسترس نیست؛ فایل به‌صورت متن ساده باز شده است.</string>
     <string name="editor_theme">پوسته ویرایشگر</string>
     <string name="editor_theme_auto">خودکار (مطابق برنامه)</string>
     <string name="editor_line_endings">پایان خط</string>

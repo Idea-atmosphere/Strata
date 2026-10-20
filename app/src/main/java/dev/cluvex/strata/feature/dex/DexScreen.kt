@@ -110,8 +110,8 @@ import dev.cluvex.strata.feature.editor.CodeEditorView
 import dev.cluvex.strata.feature.editor.EditorChrome
 import dev.cluvex.strata.feature.editor.EditorController
 import dev.cluvex.strata.feature.editor.FindBar
+import dev.cluvex.strata.feature.editor.OptionalFeatureState
 import dev.cluvex.strata.feature.editor.SearchQuery
-import dev.cluvex.strata.feature.editor.StrataColorScheme
 import dev.cluvex.strata.feature.editor.TextMateEngine
 import dev.cluvex.strata.feature.editor.autoThemeId
 import dev.cluvex.strata.feature.editor.isDarkBackground
@@ -123,7 +123,6 @@ import dev.cluvex.strata.ui.rememberSheetState
 import io.github.rosemoe.sora.event.ClickEvent
 import io.github.rosemoe.sora.event.EditorMotionEvent
 import io.github.rosemoe.sora.lang.EmptyLanguage
-import io.github.rosemoe.sora.langs.textmate.registry.ThemeRegistry
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 
@@ -459,6 +458,7 @@ private fun ClassPage(s: DexUiState, vm: DexViewModel, snackbar: SnackbarHostSta
     var findSeed by remember { mutableStateOf(SearchQuery("")) }
     var findKey by remember { mutableStateOf(0L) }
     var members by remember { mutableStateOf(false) }
+    var syntaxFailureShown by remember(cls) { mutableStateOf(false) }
     val state by rememberUpdatedState(s)
 
     controller.onEdited = { vm.onCodeEdited(controller.text()) }
@@ -526,16 +526,45 @@ private fun ClassPage(s: DexUiState, vm: DexViewModel, snackbar: SnackbarHostSta
 
     LaunchedEffect(colors, controller.editor) {
         if (controller.editor == null) return@LaunchedEffect
-        withContext(Dispatchers.Default) { TextMateEngine.init(context) }
-        withContext(Dispatchers.Main.immediate) {
-            val model = runCatching { TextMateEngine.activateTheme(autoThemeId(dark)) }.getOrNull() ?: return@withContext
-            controller.setColorScheme(StrataColorScheme(ThemeRegistry.getInstance(), model, EditorChrome.from(colors)))
+        val availability = withContext(Dispatchers.Default) { TextMateEngine.init(context) }
+        if (availability !is OptionalFeatureState.Ready) {
+            controller.setLanguage(EmptyLanguage())
+            if (!syntaxFailureShown) {
+                syntaxFailureShown = true
+                vm.say(tr(R.string.unity_editor_plain_text_fallback))
+            }
+            return@LaunchedEffect
         }
+        val model = withContext(Dispatchers.Default) { TextMateEngine.activateTheme(autoThemeId(dark)) }
+        if (model == null) {
+            controller.setLanguage(EmptyLanguage())
+            if (!TextMateEngine.isReady && !syntaxFailureShown) {
+                syntaxFailureShown = true
+                vm.say(tr(R.string.unity_editor_plain_text_fallback))
+            }
+            return@LaunchedEffect
+        }
+        val scheme = withContext(Dispatchers.Default) {
+            TextMateEngine.colorScheme(model, EditorChrome.from(colors))
+        }
+        if (scheme == null) {
+            controller.setLanguage(EmptyLanguage())
+            if (!syntaxFailureShown) {
+                syntaxFailureShown = true
+                vm.say(tr(R.string.unity_editor_plain_text_fallback))
+            }
+            return@LaunchedEffect
+        }
+        withContext(Dispatchers.Main.immediate) { controller.setColorScheme(scheme) }
     }
     LaunchedEffect(s.view, controller.editor) {
         if (controller.editor == null) return@LaunchedEffect
         val scope = if (s.view == DexView.JAVA) "source.java" else "source.smali"
-        val language = withContext(Dispatchers.Default) { runCatching { TextMateEngine.language(scope) }.getOrNull() }
+        val language = withContext(Dispatchers.Default) { TextMateEngine.language(scope) }
+        if (language == null && !TextMateEngine.isReady && !syntaxFailureShown) {
+            syntaxFailureShown = true
+            vm.say(tr(R.string.unity_editor_plain_text_fallback))
+        }
         withContext(Dispatchers.Main.immediate) { controller.setLanguage(language ?: EmptyLanguage()) }
     }
     LaunchedEffect(editing, controller.editor) { controller.setEditable(editing) }

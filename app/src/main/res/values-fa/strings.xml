@@ -15,6 +15,7 @@
     <string name="unity_localization_preview">پیش‌نمایش</string>
     <string name="unity_localization_add_preview">اجرای آزمایشی: %1$d عبارت، حدود %2$d بایت داده</string>
     <string name="unity_localization_validate_import">اعتبارسنجی TSV</string>
+    <string name="unity_localization_import_tsv">واردکردن TSV ویرایش‌شده</string>
     <string name="unity_localization_import_preview">اجرای آزمایشی: %1$d تغییر · %2$d ناشناخته · %3$d غایب · %4$d خالی · %5$d خطای نگه‌دارنده</string>
     <string name="unity_localization_apply">اعمال</string>
     <string name="unity_localization_applied">تغییرات بومی‌سازی مرحله‌بندی و تأیید شد</string>

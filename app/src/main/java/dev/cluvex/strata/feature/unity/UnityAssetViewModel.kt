@@ -59,6 +59,7 @@ import dev.cluvex.strata.core.unity.UnityTranslationReadinessEvaluator
 import dev.cluvex.strata.core.unity.UnityTranslationReadinessInput
 import dev.cluvex.strata.core.unity.UnityTranslationReadinessKind
 import dev.cluvex.strata.core.unity.UnityUnsupportedVersionException
+import dev.cluvex.strata.core.unity.ensureUnityOperationActive
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
@@ -73,6 +74,8 @@ import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.security.DigestInputStream
+import java.security.MessageDigest
 import java.util.Locale
 
 /** One-shot request for a generated draft that must open in Strata's text editor. */
@@ -90,6 +93,24 @@ internal fun consumeUnityEditorRequest(
     current: UnityEditorRequest?,
     consumedId: Long,
 ): UnityEditorRequest? = current?.takeUnless { it.id == consumedId }
+
+/** One-shot request to save a generated TSV through Android's document provider. */
+data class UnityTsvExportRequest(
+    val id: Long,
+    val suggestedName: String,
+) {
+    init {
+        require(id > 0L) { "Unity TSV export request id must be positive" }
+        require(suggestedName.endsWith(".tsv", ignoreCase = true)) {
+            "Unity TSV export name must use the .tsv extension"
+        }
+    }
+}
+
+internal fun consumeUnityTsvExportRequest(
+    current: UnityTsvExportRequest?,
+    consumedId: Long,
+): UnityTsvExportRequest? = current?.takeUnless { it.id == consumedId }
 
 data class UnityAssetUiState(
     val path: String = "",
@@ -130,6 +151,7 @@ data class UnityAssetUiState(
     val textTransformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
     val exportedTexts: Map<String, File> = emptyMap(),
     val editorRequest: UnityEditorRequest? = null,
+    val tsvExportRequest: UnityTsvExportRequest? = null,
     val output: File? = null,
     val outputSigningHandoff: UnityApkSigningHandoffState = UnityApkSigningHandoffState.NOT_APK,
     val message: String? = null,
@@ -964,20 +986,168 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                         sourceLanguageCode = sourceCode,
                     )
                 }
-                val editorRequest = newEditorRequest(output)
+                val exportRequest = newTsvExportRequest(output)
                 _state.update {
                     it.copy(
                         busy = false,
                         localizationTsv = output,
-                        editorRequest = editorRequest,
-                        message = getApplication<Application>().getString(R.string.unity_localization_exported, output.path),
+                        tsvExportRequest = exportRequest,
+                        message = null,
                     )
                 }
             } catch (e: CancellationException) {
                 _state.update { it.copy(busy = false, message = getApplication<Application>().getString(R.string.unity_operation_cancelled)) }
                 throw e
-            } catch (e: Exception) {
-                _state.update { it.copy(busy = false, message = localizationFailureMessage(e)) }
+            } catch (error: Throwable) {
+                _state.update { it.copy(busy = false, message = localizationFailureMessage(error)) }
+            }
+        }
+    }
+
+    /** Copies the generated TSV to a user-selected document; no editor route is involved. */
+    fun saveLocalizationTsv(uri: Uri, resolver: ContentResolver) {
+        val sourceFile = _state.value.localizationTsv?.takeIf { it.isFile } ?: return
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            try {
+                runInterruptible(Dispatchers.IO) {
+                    val sourceDigest = MessageDigest.getInstance("SHA-256")
+                    val target = resolver.openOutputStream(uri, "rwt")
+                        ?: throw IOException("TSV export destination is unavailable")
+                    val copied = target.use { output ->
+                        DigestInputStream(sourceFile.inputStream().buffered(), sourceDigest).use { input ->
+                            val buffer = ByteArray(64 * 1024)
+                            var total = 0L
+                            while (true) {
+                                ensureUnityOperationActive()
+                                val read = input.read(buffer)
+                                if (read < 0) break
+                                if (read == 0) continue
+                                output.write(buffer, 0, read)
+                                total += read
+                            }
+                            total
+                        }
+                    }
+                    if (copied != sourceFile.length()) {
+                        throw IOException("TSV export destination received an incomplete copy")
+                    }
+
+                    val destinationDigest = MessageDigest.getInstance("SHA-256")
+                    val destination = resolver.openInputStream(uri)
+                        ?: throw IOException("TSV export destination cannot be verified")
+                    val verifiedBytes = DigestInputStream(destination.buffered(), destinationDigest).use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            ensureUnityOperationActive()
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            if (read > 0) total += read
+                        }
+                        total
+                    }
+                    if (verifiedBytes != copied || !sourceDigest.digest().contentEquals(destinationDigest.digest())) {
+                        throw IOException("TSV export destination failed read-after-write verification")
+                    }
+                }
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        message = getApplication<Application>().getString(
+                            R.string.unity_localization_exported,
+                            uri.lastPathSegment ?: uri.toString(),
+                        ),
+                    )
+                }
+            } catch (error: CancellationException) {
+                discardCreatedDocument(resolver, uri)
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                    )
+                }
+                throw error
+            } catch (error: Throwable) {
+                discardCreatedDocument(resolver, uri)
+                _state.update { it.copy(busy = false, message = localizationFailureMessage(error)) }
+            }
+        }
+    }
+
+    /** Stages, strictly decodes and plans a user-selected TSV without mutating the bundle. */
+    fun importLocalizationTsv(uri: Uri, resolver: ContentResolver) {
+        val source = selectedLocalizationSource() ?: return
+        val dir = stageDir ?: return
+        val options = _state.value.textTransformOptions
+        val sourceCode = _state.value.localizationSourceLanguageCode
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            var staged: File? = null
+            try {
+                val result = runInterruptible(Dispatchers.IO) {
+                    val file = stageImportedLocalizationTsv(dir) {
+                        resolver.openInputStream(uri) ?: throw IOException("TSV source is unavailable")
+                    }
+                    staged = file
+                    try {
+                        file to UnityLocalizationTsv.planImport(
+                            source,
+                            readLocalizationTsvUtf8(file),
+                            options,
+                            sourceCode,
+                        )
+                    } catch (error: Throwable) {
+                        file.delete()
+                        throw error
+                    }
+                }
+                if (selectedLocalizationSource()?.origin?.tableId != source.origin.tableId) {
+                    result.first.delete()
+                    _state.update {
+                        it.copy(
+                            busy = false,
+                            message = getApplication<Application>().getString(R.string.unity_localization_conflict),
+                        )
+                    }
+                    return@launch
+                }
+                val plan = result.second
+                _state.update {
+                    withTranslationDerived(
+                        it.copy(
+                            busy = false,
+                            localizationTsv = result.first,
+                            localizationImportPlan = plan,
+                            localizationAddPlan = null,
+                            localizationRoundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+                            localizationRoundTripDetail = null,
+                            message = getApplication<Application>().getString(
+                                R.string.unity_localization_import_preview,
+                                plan.changes.size,
+                                plan.unknownKeyCount,
+                                plan.missingKeyCount,
+                                plan.emptyCellCount,
+                                plan.placeholderFailureCount,
+                            ),
+                        ),
+                    )
+                }
+            } catch (error: CancellationException) {
+                staged?.delete()
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                    )
+                }
+                throw error
+            } catch (error: Throwable) {
+                staged?.delete()
+                _state.update { it.copy(busy = false, message = localizationFailureMessage(error)) }
             }
         }
     }
@@ -1055,7 +1225,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                 val plan = runInterruptible(Dispatchers.IO) {
                     UnityLocalizationTsv.planImport(
                         source,
-                        file.readText(Charsets.UTF_8),
+                        readLocalizationTsvUtf8(file),
                         options,
                         sourceCode,
                     )
@@ -1243,7 +1413,17 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
-    private fun localizationFailureMessage(error: Exception): String {
+    private fun discardCreatedDocument(resolver: ContentResolver, uri: Uri) {
+        try {
+            resolver.delete(uri, null, null)
+        } catch (_: Exception) {
+            // The primary export failure is reported; some providers do not permit delete.
+        }
+    }
+
+    private fun localizationFailureMessage(error: Throwable): String {
+        if (error is VirtualMachineError && error !is OutOfMemoryError) throw error
+        if (error is ThreadDeath) throw error
         val detail = error.message?.takeIf { it.isNotBlank() }
         return when {
             error is UnityDocumentClosedException -> getApplication<Application>().getString(R.string.unity_staging_unavailable)
@@ -1253,16 +1433,32 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    private fun nextDraftRequestId(): Long {
+        nextEditorRequestId = if (nextEditorRequestId == Long.MAX_VALUE) 1L else nextEditorRequestId + 1L
+        return nextEditorRequestId
+    }
+
     private fun newEditorRequest(file: File): UnityEditorRequest {
         if (!file.isFile || !file.canRead()) throw IOException("Generated editor draft is unavailable")
-        nextEditorRequestId = if (nextEditorRequestId == Long.MAX_VALUE) 1L else nextEditorRequestId + 1L
-        return UnityEditorRequest(nextEditorRequestId, file.absolutePath)
+        return UnityEditorRequest(nextDraftRequestId(), file.absolutePath)
+    }
+
+    private fun newTsvExportRequest(file: File): UnityTsvExportRequest {
+        if (!file.isFile || !file.canRead()) throw IOException("Generated TSV draft is unavailable")
+        return UnityTsvExportRequest(nextDraftRequestId(), file.name)
     }
 
     fun consumeEditorRequest(id: Long) {
         _state.update { current ->
             val remaining = consumeUnityEditorRequest(current.editorRequest, id)
             if (remaining === current.editorRequest) current else current.copy(editorRequest = remaining)
+        }
+    }
+
+    fun consumeTsvExportRequest(id: Long) {
+        _state.update { current ->
+            val remaining = consumeUnityTsvExportRequest(current.tsvExportRequest, id)
+            if (remaining === current.tsvExportRequest) current else current.copy(tsvExportRequest = remaining)
         }
     }
 

@@ -1,5 +1,6 @@
 package dev.cluvex.strata.feature.unity
 
+import android.content.ActivityNotFoundException
 import android.os.Environment
 import android.provider.DocumentsContract
 import androidx.activity.compose.BackHandler
@@ -147,8 +148,8 @@ fun UnityAssetScreen(
                 vm.notifyMessage(context.getString(R.string.unity_staging_unavailable))
             } else {
                 try {
-                    // Generated JSON/TSV drafts always belong in Strata's text editor. Bypassing
-                    // generic file resolution also avoids probing or external-app defaults here.
+                    // Generated JSON drafts open directly in Strata's text editor. Localization
+                    // TSV uses a document-provider round trip so this route is never required.
                     onEditTextFile(draft.absolutePath)
                 } catch (error: Exception) {
                     val detail = error.message?.takeIf { it.isNotBlank() }
@@ -207,6 +208,32 @@ fun UnityAssetScreen(
                 } finally {
                     localBusy = false
                 }
+            }
+        }
+    }
+
+    val tsvSavePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("text/tab-separated-values"),
+    ) { uri ->
+        if (uri != null) vm.saveLocalizationTsv(uri, context.contentResolver)
+    }
+
+    val tsvImportPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.importLocalizationTsv(uri, context.contentResolver)
+    }
+
+    LaunchedEffect(state.tsvExportRequest?.id) {
+        state.tsvExportRequest?.let { request ->
+            // Consume first so configuration changes or returning from the picker cannot replay it.
+            vm.consumeTsvExportRequest(request.id)
+            try {
+                tsvSavePicker.launch(request.suggestedName)
+            } catch (_: ActivityNotFoundException) {
+                vm.notifyMessage(context.getString(R.string.unity_operation_failed))
+            } catch (_: SecurityException) {
+                vm.notifyMessage(context.getString(R.string.unity_operation_failed))
+            } catch (_: Exception) {
+                vm.notifyMessage(context.getString(R.string.unity_operation_failed))
             }
         }
     }
@@ -462,7 +489,17 @@ fun UnityAssetScreen(
                                                     newLanguageCode = ""
                                                     addLanguagePrompt = true
                                                 },
-                                                onValidateImport = vm::planLocalizationImport,
+                                                onImportTsv = {
+                                                    try {
+                                                        tsvImportPicker.launch(arrayOf("text/*", "application/octet-stream"))
+                                                    } catch (_: ActivityNotFoundException) {
+                                                        vm.notifyMessage(context.getString(R.string.unity_operation_failed))
+                                                    } catch (_: SecurityException) {
+                                                        vm.notifyMessage(context.getString(R.string.unity_operation_failed))
+                                                    } catch (_: Exception) {
+                                                        vm.notifyMessage(context.getString(R.string.unity_operation_failed))
+                                                    }
+                                                },
                                                 onApply = { vm.applyLocalizationPlan(entry) },
                                             )
                                         }
@@ -821,7 +858,7 @@ private fun LocalizationActions(
     onExportAll: () -> Unit,
     onExportLanguage: (String) -> Unit,
     onAddLanguage: () -> Unit,
-    onValidateImport: () -> Unit,
+    onImportTsv: () -> Unit,
     onApply: () -> Unit,
 ) {
     var targetPrompt by remember(selected?.origin?.tableId) { mutableStateOf(false) }
@@ -833,7 +870,7 @@ private fun LocalizationActions(
             UnityTranslationNextAction.INSPECT_OR_REPLACE_FONT -> onInspectFont()
             UnityTranslationNextAction.USE_SUPPORTED_COMPRESSION -> onDiscoverSource()
             UnityTranslationNextAction.PREPARE_TRANSLATION -> {
-                if (hasTsv) onValidateImport()
+                if (hasTsv) onImportTsv()
                 else targetLanguageCode?.let(onExportLanguage) ?: run { targetPrompt = true }
             }
             UnityTranslationNextAction.VALIDATE_AND_STAGE,
@@ -953,11 +990,11 @@ private fun LocalizationActions(
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         OutlinedButton(
-                            onClick = onValidateImport,
-                            enabled = !busy && hasTsv,
+                            onClick = onImportTsv,
+                            enabled = !busy,
                             modifier = Modifier.weight(1f),
                         ) {
-                            Text(stringResource(R.string.unity_localization_validate_import), maxLines = 1)
+                            Text(stringResource(R.string.unity_localization_import_tsv), maxLines = 1)
                         }
                         Button(
                             onClick = onApply,
