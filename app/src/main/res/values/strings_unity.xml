@@ -60,6 +60,7 @@
     <string name="unity_font_report_title">Font capability (%1$d TMP, %2$d Font)</string>
     <string name="unity_shape_arabic">Persian/Arabic contextual shaping</string>
     <string name="unity_reverse_bidi">Visual RTL bidi reordering</string>
+    <string name="unity_normalize_persian">Normalize Arabic Yeh/Kaf to Persian</string>
     <string name="unity_font_enable_dynamic">Bind dynamic TTF font…</string>
     <string name="unity_font_rewrite_warning_title">Rewrite bundle for font update?</string>
     <string name="unity_font_rewrite_warning_body">Patching fonts in %1$s requires restreaming and LZ4-compressing %2$s of temporary data (estimated %3$d–%4$d s).</string>

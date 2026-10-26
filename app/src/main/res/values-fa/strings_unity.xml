@@ -60,6 +60,7 @@
     <string name="unity_font_report_title">قابلیت فونت (%1$d TMP، %2$d Font)</string>
     <string name="unity_shape_arabic">شکل‌دهی بافتاری حروف فارسی/عربی</string>
     <string name="unity_reverse_bidi">بازچینی بصری راست‌به‌چپ (Bidi)</string>
+    <string name="unity_normalize_persian">یکسان‌سازی ی/ک عربی به ی/ک فارسی</string>
     <string name="unity_font_enable_dynamic">اتصال فونت پویا (TTF)…</string>
     <string name="unity_font_rewrite_warning_title">بازنویسی بسته برای تغییر فونت؟</string>
     <string name="unity_font_rewrite_warning_body">اصلاح فونت در %1$s نیازمند بازخوانی و فشرده‌سازی LZ4 حدود %2$s دادهٔ موقت است (زمان تخمینی %3$d تا %4$d ثانیه).</string>

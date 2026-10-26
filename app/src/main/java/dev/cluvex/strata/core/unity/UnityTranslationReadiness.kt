@@ -103,10 +103,27 @@ data class UnityTranslationFontCoverage(
     val inspectedTmpFontCount: Int,
     val inspectedRawFontCount: Int,
     val unavailableReason: UnityTextUnavailableReason? = null,
+    /**
+     * Codepoints missing from the target text AFTER the active text transforms are applied.
+     * When shaping is enabled the game renders Presentation Forms, not the logical letters the
+     * translator typed, so only this set describes what will actually show as missing glyphs.
+     * Empty when no transform is active; the source text is never transformed at import, so it
+     * has no transformed counterpart.
+     */
+    val missingTransformedTargetCodepoints: List<Int> = emptyList(),
+    val transformApplied: Boolean = false,
 ) {
     val missingCodepoints: List<Int> = (missingTargetCodepoints + missingSourceCodepoints).distinct().sorted()
     val missingCount: Int get() = missingCodepoints.size
-    val complete: Boolean get() = unavailableReason == null && missingCodepoints.isEmpty()
+    /** Missing glyphs for the text the game will render: shaped when transforms are active. */
+    val effectiveMissingCodepoints: List<Int>
+        get() = if (transformApplied) {
+            (missingTransformedTargetCodepoints + missingSourceCodepoints).distinct().sorted()
+        } else {
+            missingCodepoints
+        }
+    val effectiveMissingCount: Int get() = effectiveMissingCodepoints.size
+    val complete: Boolean get() = unavailableReason == null && effectiveMissingCodepoints.isEmpty()
 }
 
 /** Computes coverage from actual pending values, never from a script or language-name guess. */
@@ -116,6 +133,7 @@ object UnityTranslationFontCoverageEvaluator {
         source: LocalizationSource,
         targetLanguageCode: String,
         sourceLanguageCode: String?,
+        transformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
     ): UnityTranslationFontCoverage {
         val targetIndex = source.languageIndex(targetLanguageCode)
         require(targetIndex >= 0) { "Unknown target language '$targetLanguageCode'" }
@@ -124,6 +142,19 @@ object UnityTranslationFontCoverageEvaluator {
         val sourceText = sourceIndex?.let { index ->
             source.terms.mapNotNull { it.values[index] }.joinToString("\n")
         }.orEmpty()
+        // The game renders the transformed target text (shaped/reordered at import), so when
+        // transforms are active the transformed codepoints — not the logical ones — decide
+        // whether glyphs will be missing. Each value is transformed exactly as import does
+        // (directives preserved); the source column is never transformed at import.
+        val transformedTargetText = if (transformOptions.isEnabled) {
+            source.terms.mapNotNull { term ->
+                term.values[targetIndex]?.let {
+                    UnityLocalizationTsv.transformPreservingDirectives(it, transformOptions)
+                }
+            }.joinToString("\n")
+        } else {
+            ""
+        }
         return UnityTranslationFontCoverage(
             targetLanguageCode = targetLanguageCode,
             targetCodepointCount = codepoints(targetText).size,
@@ -133,6 +164,12 @@ object UnityTranslationFontCoverageEvaluator {
             inspectedTmpFontCount = report.tmpFontAssets.size,
             inspectedRawFontCount = report.rawFonts.size,
             unavailableReason = report.unavailableReason,
+            missingTransformedTargetCodepoints = if (transformOptions.isEnabled) {
+                report.missingCodepointsFor(transformedTargetText).sorted()
+            } else {
+                emptyList()
+            },
+            transformApplied = transformOptions.isEnabled,
         )
     }
 
@@ -317,10 +354,10 @@ object UnityTranslationReadinessEvaluator {
 
     private fun fontDetail(coverage: UnityTranslationFontCoverage): String? {
         if (coverage.unavailableReason != null) return null
-        val values = coverage.missingCodepoints.take(32).joinToString(",") {
+        val values = coverage.effectiveMissingCodepoints.take(32).joinToString(",") {
             "U+${it.toString(16).uppercase().padStart(4, '0')}"
         }
-        return if (coverage.missingCodepoints.size > 32) "$values,…" else values
+        return if (coverage.effectiveMissingCodepoints.size > 32) "$values,…" else values
     }
 
     private fun ready(kind: UnityTranslationReadinessKind, detail: String? = null) =

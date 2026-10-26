@@ -360,6 +360,128 @@ class UnityFontAndShapingTest {
         }
     }
 
+    @Test
+    fun normalizesArabicYehKafAndAlefMaksuraToPersianBeforeShaping() {
+        // Raw mappings, written with escapes so Arabic vs Persian letters cannot be confused.
+        assertThat(UnityTextShaper.normalizePersianCharacters("\u064A\u0643"))
+            .isEqualTo("\u06CC\u06A9")
+        assertThat(UnityTextShaper.normalizePersianCharacters("\u0649")).isEqualTo("\u06CC")
+        // Digits, punctuation and ZWNJ are untouched by normalization.
+        assertThat(UnityTextShaper.normalizePersianCharacters("می\u200Cشود ۱۲۳"))
+            .isEqualTo("می\u200Cشود ۱۲۳")
+
+        // Arabic Kaf (ك) typed on an Arabic keyboard shapes to Persian Keheh forms once
+        // normalization runs before shaping: كتاب -> کتاب -> FB90 FE98 FE8E FE8F.
+        assertThat(
+            UnityTextShaper.transform(
+                "\u0643تاب",
+                UnityTextTransformOptions(normalizePersian = true, shapeArabic = true),
+            ),
+        ).isEqualTo("\uFB90\uFE98\uFE8E\uFE8F")
+        // Without normalization the same input keeps Arabic Kaf forms (initial 0xFEDB).
+        assertThat(
+            UnityTextShaper.transform(
+                "\u0643تاب",
+                UnityTextTransformOptions(shapeArabic = true),
+            ),
+        ).isEqualTo("\uFEDB\uFE98\uFE8E\uFE8F")
+    }
+
+    @Test
+    fun fontCoverageChecksShapedCodepointsWhenShapingIsEnabled() {
+        // Static TMP atlas containing only the LOGICAL Persian letters of "می"
+        // (Meem 0x0645, Farsi Yeh 0x06CC) — no presentation forms at all.
+        val tmp = UnityTmpFontAssetReport(
+            entryName = "test",
+            partIndex = 0,
+            pathId = 1L,
+            name = "TestFont",
+            glyphCount = 2,
+            characterCount = 2,
+            populationModeRaw = 0,
+            populationMode = UnityFontPopulationMode.STATIC,
+            sourceFontFileId = 0,
+            sourceFontPathId = 0L,
+            resolvedSourceFontName = null,
+            sourceFontSupportsArabic = false,
+            atlasTextureCount = 1,
+            atlasWidth = 512,
+            atlasHeight = 512,
+            coverage = UnicodeBlockCoverage(arabicBaseCount = 2),
+            codepoints = setOf(0x0645, 0x06CC),
+            statusReason = null,
+            capabilityStatement = "test",
+        )
+        val report = UnityFontReport(
+            inspectedEntries = 1,
+            tmpFontAssets = listOf(tmp),
+            rawFonts = emptyList(),
+            summaryStatement = "test",
+        )
+        val origin = LocalizationOrigin(
+            entryName = "test",
+            partIndex = 0,
+            pathId = 1L,
+            objectEntryName = "test",
+            termsPath = emptyList(),
+            languagesPath = emptyList(),
+            languageCountPath = null,
+            termKeyField = "key",
+            termValuesField = "values",
+            languageNameField = "name",
+            languageCodeField = "code",
+            languageFlagsField = "flags",
+        )
+        val source = LocalizationSource.create(
+            name = "test",
+            languages = listOf(
+                LocalizationLanguage("English", "en", 0),
+                LocalizationLanguage("Persian", "fa", 0),
+            ),
+            terms = listOf(
+                LocalizationTerm.aligned("greeting", listOf("Hello", "می"), 2),
+            ),
+            origin = origin,
+        )
+
+        // Shaping off: logical letters are covered, so the check passes.
+        val unshaped = UnityTranslationFontCoverageEvaluator.evaluate(
+            report = report,
+            source = source,
+            targetLanguageCode = "fa",
+            sourceLanguageCode = "en",
+        )
+        assertThat(unshaped.complete).isTrue()
+        assertThat(unshaped.transformApplied).isFalse()
+
+        // Shaping on: the game renders Meem initial (0xFEE3) + Farsi Yeh final (0xFBFD),
+        // neither of which is in the atlas — the old logical-only check would wrongly pass.
+        val shaped = UnityTranslationFontCoverageEvaluator.evaluate(
+            report = report,
+            source = source,
+            targetLanguageCode = "fa",
+            sourceLanguageCode = "en",
+            transformOptions = UnityTextTransformOptions(shapeArabic = true),
+        )
+        assertThat(shaped.transformApplied).isTrue()
+        assertThat(shaped.missingTransformedTargetCodepoints).containsExactly(0xFBFD, 0xFEE3)
+        assertThat(shaped.effectiveMissingCodepoints).containsExactly(0xFBFD, 0xFEE3)
+        assertThat(shaped.complete).isFalse()
+    }
+
+    @Test
+    fun ttfMissingCodepointsReportsShapedGlyphGaps() {
+        // Minimal TTF covering only logical Arabic letters (0x0627..0x064A).
+        val logicalOnlyTtf = buildMinimalTtfWithCmap(listOf(0x0627..0x064A))
+        // Shaped "می" needs Meem initial (0xFEE3) and Farsi Yeh final (0xFBFD).
+        assertThat(TtfCmapInspector.missingCodepoints(logicalOnlyTtf, "\uFEE3\uFBFD"))
+            .containsExactly(0xFBFD, 0xFEE3)
+
+        // A TTF that also covers the presentation-form blocks passes the same text.
+        val fullTtf = buildMinimalTtfWithCmap(listOf(0x0627..0x064A, 0xFB50..0xFEFF))
+        assertThat(TtfCmapInspector.missingCodepoints(fullTtf, "\uFEE3\uFBFD")).isEmpty()
+    }
+
     // ---------------------------------------------------------------------------------------
     // Synthetic fixtures for TMP_FontAsset (MonoBehaviour class 114), Font (class 128), and TTF
     // ---------------------------------------------------------------------------------------

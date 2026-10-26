@@ -1372,6 +1372,9 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                 source = source,
                 targetLanguageCode = target,
                 sourceLanguageCode = state.localizationSourceLanguageCode,
+                // Coverage must follow the transforms that will be applied at import:
+                // shaped text needs presentation-form glyphs, not the logical letters.
+                transformOptions = state.textTransformOptions,
             )
         } else {
             null
@@ -1558,6 +1561,13 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    fun setNormalizePersian(enabled: Boolean) {
+        exportedBaselines = emptyMap()
+        _state.update {
+            it.copy(textTransformOptions = it.textTransformOptions.copy(normalizePersian = enabled))
+        }
+    }
+
     fun estimateRewrite(): UnityBundleRewriteEstimate? = document?.estimateRewrite()
 
     fun inspectFonts(entry: UnityBundleEntry) {
@@ -1605,6 +1615,27 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         if (startingState.busy) return
         val preserveLocalization = entry.name in startingState.localizationReplacementEntries
         val localizationTables = startingState.localizationSources[entry.name].orEmpty()
+        // When a pending translation exists and transforms are active, the picked font must
+        // cover the shaped text the game will render — not just the logical letters — so the
+        // patch is rejected up front instead of producing tofu boxes after a long repack.
+        // Without pending translations (or with transforms off) the check is skipped; the
+        // post-patch font-coverage check still reports gaps.
+        val expectedShapedText = if (startingState.textTransformOptions.isEnabled) {
+            val source = pendingLocalizationSource(startingState)
+            val target = startingState.localizationTargetLanguageCode
+            val targetIndex = source?.let { it.languageIndex(target ?: "") } ?: -1
+            if (source != null && targetIndex >= 0) {
+                source.terms.mapNotNull { term ->
+                    term.values[targetIndex]?.let {
+                        UnityLocalizationTsv.transformPreservingDirectives(it, startingState.textTransformOptions)
+                    }
+                }.joinToString("\n").takeIf { it.isNotEmpty() }
+            } else {
+                null
+            }
+        } else {
+            null
+        }
         _state.update { it.copy(busy = true) }
         viewModelScope.launch {
             try {
@@ -1615,7 +1646,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                     } else {
                         null
                     }
-                    doc.patchFontForDynamicGeneration(entry, ttfBytes)
+                    doc.patchFontForDynamicGeneration(entry, ttfBytes, expectedShapedText = expectedShapedText)
                 }
                 when (outcome) {
                     is UnityFontPatchResult.Success -> {

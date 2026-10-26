@@ -652,6 +652,28 @@ internal object TtfCmapInspector {
             (range.first <= 0xFEFC && range.last >= 0xFE80)
     } == true
 
+    /**
+     * Codepoints in [text] that this font cannot render. A null cmap (no usable cmap table)
+     * means every non-whitespace codepoint is missing; malformed cmap data throws the same
+     * typed [UnityFormatException] as [coverage] instead of silently reporting full coverage.
+     * Callers pass the text the game will actually render (shaped, when shaping is active),
+     * so presentation-form gaps are caught before a multi-minute repack instead of as tofu
+     * boxes on device.
+     */
+    fun missingCodepoints(bytes: ByteArray, text: String): Set<Int> {
+        val coverage = coverage(bytes)
+        val missing = LinkedHashSet<Int>()
+        var i = 0
+        while (i < text.length) {
+            val cp = Character.codePointAt(text, i)
+            i += Character.charCount(cp)
+            if (!Character.isWhitespace(cp) && (coverage == null || cp !in coverage)) {
+                missing += cp
+            }
+        }
+        return missing
+    }
+
     /** Parses exact Unicode coverage from bounded cmap format 4/12 subtables. */
     fun coverage(bytes: ByteArray): TtfCodepointCoverage? {
         if (!isValidFontHeader(bytes)) return null

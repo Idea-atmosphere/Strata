@@ -12,12 +12,18 @@ import java.text.Bidi
  * - [reverseBidi]: converts logical bidirectional text into visual left-to-right order using
  *   [java.text.Bidi] (UAX #9) so renderers without RTL support draw RTL runs right-to-left while
  *   keeping embedded Latin words and digits (`120`, `2022`, `۱۲۳`) left-to-right.
+ * - [normalizePersian]: maps Arabic Yeh (`ي`, `0x064A`) and Arabic Kaf (`ك`, `0x0643`) to their
+ *   Persian counterparts (`ی`, `0x06CC`; `ک`, `0x06A9`), and Alef Maksura (`ى`, `0x0649`) to
+ *   Farsi Yeh. Translators typing on Arabic keyboards otherwise produce Arabic-style glyphs
+ *   inside Persian text; normalization runs before shaping so the shaped output always uses
+ *   the Persian letter forms.
  */
 data class UnityTextTransformOptions(
     val shapeArabic: Boolean = false,
     val reverseBidi: Boolean = false,
+    val normalizePersian: Boolean = false,
 ) {
-    val isEnabled: Boolean get() = shapeArabic || reverseBidi
+    val isEnabled: Boolean get() = shapeArabic || reverseBidi || normalizePersian
 }
 
 internal object UnityTextShaper {
@@ -154,6 +160,9 @@ internal object UnityTextShaper {
     fun transform(text: String, options: UnityTextTransformOptions): String {
         if (text.isEmpty() || !options.isEnabled) return text
         var current = text
+        if (options.normalizePersian) {
+            current = normalizePersianCharacters(current)
+        }
         if (options.shapeArabic) {
             current = shapeArabicPersian(current)
         }
@@ -161,6 +170,30 @@ internal object UnityTextShaper {
             current = reorderBidiVisual(current)
         }
         return current
+    }
+
+    /**
+     * Maps Arabic-script letters that Persian does not use to their Persian counterparts.
+     * Only the three well-known confusables are mapped; digits, punctuation, diacritics and
+     * join controls (ZWNJ/ZWJ) are left untouched so digit style and word boundaries stay
+     * exactly as the translator typed them.
+     */
+    fun normalizePersianCharacters(text: String): String {
+        if (text.isEmpty()) return text
+        var changed = false
+        val chars = text.toCharArray()
+        for (i in chars.indices) {
+            val replacement = when (chars[i]) {
+                '\u064A', '\u0649' -> '\u06CC' // Arabic Yeh / Alef Maksura -> Farsi Yeh
+                '\u0643' -> '\u06A9' // Arabic Kaf -> Persian Keheh
+                else -> null
+            }
+            if (replacement != null) {
+                chars[i] = replacement
+                changed = true
+            }
+        }
+        return if (changed) String(chars) else text
     }
 
     /**

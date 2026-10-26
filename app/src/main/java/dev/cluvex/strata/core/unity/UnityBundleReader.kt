@@ -921,9 +921,18 @@ class UnityBundleDocument internal constructor(
         ttfBytes: ByteArray? = null,
         targetTmpPathId: Long? = null,
         targetFontPathId: Long? = null,
+        /**
+         * The pending translation text the game will actually render (already shaped/reordered
+         * when transforms are active). When supplied together with [ttfBytes], the picked font
+         * is rejected before any repack if it cannot render this text — a font that covers
+         * logical Arabic letters but not the presentation forms shaping produces would
+         * otherwise pass the Arabic-cmap check and render as tofu boxes. Null (no pending
+         * translation yet) skips the check; post-patch font coverage still reports gaps.
+         */
+        expectedShapedText: String? = null,
     ): UnityFontPatchResult = try {
         withOpenDocument {
-            patchFontForDynamicGenerationOpen(entry, ttfBytes, targetTmpPathId, targetFontPathId)
+            patchFontForDynamicGenerationOpen(entry, ttfBytes, targetTmpPathId, targetFontPathId, expectedShapedText)
         }
     } catch (_: UnityDocumentClosedException) {
         UnityFontPatchResult.Unavailable(
@@ -937,6 +946,7 @@ class UnityBundleDocument internal constructor(
         ttfBytes: ByteArray?,
         targetTmpPathId: Long?,
         targetFontPathId: Long?,
+        expectedShapedText: String?,
     ): UnityFontPatchResult {
         requireEntry(entry)
         if (ttfBytes != null) {
@@ -951,6 +961,19 @@ class UnityBundleDocument internal constructor(
                     UnityTextUnavailableReason.FONT_NO_GLYPHS,
                     "Supplied font file does not contain Arabic/Persian codepoints in its cmap table",
                 )
+            }
+            if (expectedShapedText != null) {
+                val missing = TtfCmapInspector.missingCodepoints(ttfBytes, expectedShapedText)
+                if (missing.isNotEmpty()) {
+                    val shown = missing.sorted().take(32).joinToString(",") {
+                        "U+${it.toString(16).uppercase().padStart(4, '0')}"
+                    }
+                    val suffix = if (missing.size > 32) ",…" else ""
+                    return UnityFontPatchResult.Unavailable(
+                        UnityTextUnavailableReason.FONT_NO_GLYPHS,
+                        "Supplied font file is missing ${missing.size} glyph(s) required by the pending translation: $shown$suffix",
+                    )
+                }
             }
         }
 

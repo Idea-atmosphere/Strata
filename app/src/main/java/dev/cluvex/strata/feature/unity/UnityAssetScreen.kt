@@ -444,6 +444,7 @@ fun UnityAssetScreen(
                                                 textTransformOptions = state.textTransformOptions,
                                                 onToggleShapeArabic = vm::setShapeArabic,
                                                 onToggleReverseBidi = vm::setReverseBidi,
+                                                onToggleNormalizePersian = vm::setNormalizePersian,
                                                 textIssue = state.textIssues[entry.name],
                                             )
                                             LocalizationActions(
@@ -464,6 +465,7 @@ fun UnityAssetScreen(
                                                 textTransformOptions = state.textTransformOptions,
                                                 onToggleShapeArabic = vm::setShapeArabic,
                                                 onToggleReverseBidi = vm::setReverseBidi,
+                                                onToggleNormalizePersian = vm::setNormalizePersian,
                                                 onFind = { vm.inspectLocalizations(entry) },
                                                 onDiscoverSource = { showDiscovery = true },
                                                 onSelectTable = vm::selectLocalizationTable,
@@ -727,6 +729,7 @@ private fun UnityEntryActions(
     textTransformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
     onToggleShapeArabic: ((Boolean) -> Unit)? = null,
     onToggleReverseBidi: ((Boolean) -> Unit)? = null,
+    onToggleNormalizePersian: ((Boolean) -> Unit)? = null,
     textIssue: UnityTextUnavailableReason? = null,
 ) {
     Surface(shape = RoundedCornerShape(20.dp), color = MaterialTheme.colorScheme.surfaceContainer, modifier = Modifier.fillMaxWidth().padding(top = 8.dp)) {
@@ -791,7 +794,7 @@ private fun UnityEntryActions(
                 }
             }
             if (onExportTexts != null) {
-                if (onToggleShapeArabic != null && onToggleReverseBidi != null) {
+                if (onToggleShapeArabic != null && onToggleReverseBidi != null && onToggleNormalizePersian != null) {
                     Row(
                         Modifier.fillMaxWidth().padding(top = 4.dp),
                         verticalAlignment = Alignment.CenterVertically,
@@ -822,6 +825,21 @@ private fun UnityEntryActions(
                             modifier = Modifier.weight(1f),
                         )
                     }
+                    Row(
+                        Modifier.fillMaxWidth(),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Checkbox(
+                            checked = textTransformOptions.normalizePersian,
+                            onCheckedChange = onToggleNormalizePersian,
+                            enabled = !busy,
+                        )
+                        Text(
+                            stringResource(R.string.unity_normalize_persian),
+                            style = MaterialTheme.typography.bodySmall,
+                            modifier = Modifier.weight(1f),
+                        )
+                    }
                 }
                 Button(onClick = onExportTexts, enabled = !busy, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
                     Text(stringResource(R.string.unity_export_texts), maxLines = 1)
@@ -848,6 +866,7 @@ private fun LocalizationActions(
     textTransformOptions: UnityTextTransformOptions,
     onToggleShapeArabic: (Boolean) -> Unit,
     onToggleReverseBidi: (Boolean) -> Unit,
+    onToggleNormalizePersian: (Boolean) -> Unit,
     onFind: () -> Unit,
     onDiscoverSource: () -> Unit,
     onSelectTable: (String) -> Unit,
@@ -979,6 +998,14 @@ private fun LocalizationActions(
                             )
                             Text(stringResource(R.string.unity_reverse_bidi), style = MaterialTheme.typography.bodySmall)
                         }
+                    }
+                    Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                        Checkbox(
+                            checked = textTransformOptions.normalizePersian,
+                            onCheckedChange = onToggleNormalizePersian,
+                            enabled = !busy,
+                        )
+                        Text(stringResource(R.string.unity_normalize_persian), style = MaterialTheme.typography.bodySmall)
                     }
                     Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(6.dp)) {
                         OutlinedButton(onClick = onExportAll, enabled = !busy, modifier = Modifier.weight(1f)) {

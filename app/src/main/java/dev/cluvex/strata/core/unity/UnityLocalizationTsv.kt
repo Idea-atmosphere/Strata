@@ -310,7 +310,12 @@ object UnityLocalizationTsv {
     private fun sameDirectiveMultiset(left: List<String>, right: List<String>): Boolean =
         left.groupingBy { it }.eachCount() == right.groupingBy { it }.eachCount()
 
-    private fun transformPreservingDirectives(text: String, options: UnityTextTransformOptions): String {
+    /**
+     * Transforms one cell value exactly as import does, keeping `{directive}` placeholders
+     * untransformed. Internal so font-coverage evaluation can measure the glyphs the game
+     * will actually render (shaped, not logical) instead of duplicating this logic.
+     */
+    internal fun transformPreservingDirectives(text: String, options: UnityTextTransformOptions): String {
         if (!options.isEnabled) return text
         val output = StringBuilder(text.length)
         var cursor = 0
