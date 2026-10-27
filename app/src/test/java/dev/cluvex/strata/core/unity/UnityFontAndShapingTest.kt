@@ -408,7 +408,11 @@ class UnityFontAndShapingTest {
             atlasWidth = 512,
             atlasHeight = 512,
             coverage = UnicodeBlockCoverage(arabicBaseCount = 2),
-            codepoints = setOf(0x0645, 0x06CC),
+            // + the Latin glyphs of the English source text "Hello": the coverage
+            // `complete` flag covers both the target and source columns, so the
+            // fixture must cover both — otherwise the unshaped check fails on
+            // the source letters even though the Persian letters are covered.
+            codepoints = setOf(0x0645, 0x06CC, 0x0048, 0x0065, 0x006C, 0x006F),
             statusReason = null,
             capabilityStatement = "test",
         )
