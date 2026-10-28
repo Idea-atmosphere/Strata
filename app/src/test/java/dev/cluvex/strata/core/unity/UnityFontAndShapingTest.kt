@@ -249,6 +249,25 @@ class UnityFontAndShapingTest {
     }
 
     @Test
+    fun format4SentinelSegmentWithMaxRangeOffsetIsSkipped() {
+        // TrashHand (Bendy and the Dark Revival) ends its format 4 cmap with a
+        // 0xFFFF..0xFFFF segment whose idRangeOffset is 0xFFFF. Resolving glyphs
+        // for it addresses past the subtable; the segment is a terminator and
+        // must be ignored instead of failing the whole inspection.
+        val font = buildMinimalTtfWithCmap(
+            ranges = listOf(0x0041..0x0042),
+            sentinelDelta = 1,
+            sentinelRangeOffset = 0xFFFF,
+        )
+
+        val coverage = TtfCmapInspector.coverage(font)
+
+        assertThat(coverage).isNotNull()
+        assertThat(coverage!!.ranges).containsExactly(0x0041..0x0042)
+        assertThat(0xFFFF in coverage).isFalse()
+    }
+
+    @Test
     fun patchesStaticTmpFontToDynamicWithEmbeddedArabicTtfAndVerifiesRoundTrip() {
         val arabicTtf = buildMinimalTtfWithCmap(
             ranges = listOf(0x0020..0x007E, 0x0600..0x06FF, 0xFB50..0xFDFF, 0xFE70..0xFEFF),
@@ -964,7 +983,11 @@ class UnityFontAndShapingTest {
         return output
     }
 
-    private fun buildMinimalTtfWithCmap(ranges: List<IntRange>): ByteArray {
+    private fun buildMinimalTtfWithCmap(
+        ranges: List<IntRange>,
+        sentinelDelta: Int = 0,
+        sentinelRangeOffset: Int = 0,
+    ): ByteArray {
         val allRanges = ranges + listOf(0xFFFF..0xFFFF)
         val segCount = allRanges.size
         val segCountX2 = segCount * 2
@@ -1004,8 +1027,12 @@ class UnityFontAndShapingTest {
         allRanges.forEach { buf.putShort(it.last.toShort()) }
         buf.putShort(0) // reservedPad
         allRanges.forEach { buf.putShort(it.first.toShort()) }
-        allRanges.forEach { _ -> buf.putShort(0) } // idDelta
-        allRanges.forEach { _ -> buf.putShort(0) } // idRangeOffset
+        allRanges.forEachIndexed { index, _ ->
+            buf.putShort(if (index == allRanges.lastIndex) sentinelDelta.toShort() else 0)
+        } // idDelta
+        allRanges.forEachIndexed { index, _ ->
+            buf.putShort(if (index == allRanges.lastIndex) sentinelRangeOffset.toShort() else 0)
+        } // idRangeOffset
 
         return buf.array()
     }

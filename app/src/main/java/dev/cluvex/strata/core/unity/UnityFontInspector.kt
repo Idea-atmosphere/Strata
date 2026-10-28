@@ -758,6 +758,12 @@ internal object TtfCmapInspector {
         repeat(segmentCount) { index ->
             val start = unsignedShort(buffer, startCodesOffset + index * 2)
             val finish = unsignedShort(buffer, endCodesOffset + index * 2)
+            // A 0xFFFF..0xFFFF segment is a terminator, not a mapping: it can only
+            // map the noncharacter U+FFFF to glyph 0. Fonts in the wild set its
+            // idRangeOffset to 0xFFFF (e.g. TrashHand in Bendy and the Dark
+            // Revival), which would address far past the subtable, so skip it
+            // instead of resolving glyphs for it.
+            if (start == 0xFFFF && finish == 0xFFFF) return@repeat
             if (start > finish) malformed("cmap format 4 segment is reversed")
             visits += finish.toLong() - start + 1L
             if (visits > MAX_FORMAT4_VISITS) malformed("cmap format 4 exceeds the visit budget")
@@ -767,6 +773,7 @@ internal object TtfCmapInspector {
         repeat(segmentCount) { index ->
             val start = unsignedShort(buffer, startCodesOffset + index * 2)
             val finish = unsignedShort(buffer, endCodesOffset + index * 2)
+            if (start == 0xFFFF && finish == 0xFFFF) return@repeat
             val delta = buffer.getShort(deltasOffset + index * 2).toInt()
             val rangeOffsetPosition = rangeOffsetsOffset + index * 2
             val rangeOffset = unsignedShort(buffer, rangeOffsetPosition)
