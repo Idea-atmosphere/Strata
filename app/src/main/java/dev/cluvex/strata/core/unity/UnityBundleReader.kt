@@ -912,10 +912,14 @@ class UnityBundleDocument internal constructor(
     }
 
     /**
-     * Shared guard for a user-picked TTF: it must be a real sfnt font, cover Arabic/Persian
-     * codepoints, and — when the pending translation text is known — every shaped codepoint
-     * the game will render. Returns the [UnityFontPatchResult.Unavailable] to report, or null
-     * when the font passes. A null [ttfBytes] (bind-only dynamic patch) skips every check.
+     * Shared guard for a user-picked TTF: it must be a real sfnt font and — when the
+     * pending translation text is known — cover every shaped codepoint the game will
+     * render. Script coverage is enforced against that pending text only, never
+     * against Arabic/Persian specifically: a translator working on any other script,
+     * or re-applying a game's own font, must not be blocked for lacking Arabic glyphs
+     * they never asked for. Returns the [UnityFontPatchResult.Unavailable] to report,
+     * or null when the font passes. A null [ttfBytes] (bind-only dynamic patch) skips
+     * every check.
      */
     private fun validatePickedTtf(
         ttfBytes: ByteArray?,
@@ -926,12 +930,6 @@ class UnityBundleDocument internal constructor(
             return UnityFontPatchResult.Unavailable(
                 UnityTextUnavailableReason.DECODE_FAILED,
                 "Supplied font file is not a valid TrueType/OpenType (sfnt) font",
-            )
-        }
-        if (!TtfCmapInspector.supportsArabicScript(ttfBytes)) {
-            return UnityFontPatchResult.Unavailable(
-                UnityTextUnavailableReason.FONT_NO_GLYPHS,
-                "Supplied font file does not contain Arabic/Persian codepoints in its cmap table",
             )
         }
         if (expectedShapedText != null) {
@@ -1007,11 +1005,13 @@ class UnityBundleDocument internal constructor(
         targetFontPathId: Long? = null,
         /**
          * The pending translation text the game will actually render (already shaped/reordered
-         * when transforms are active). When supplied together with [ttfBytes], the picked font
-         * is rejected before any repack if it cannot render this text — a font that covers
-         * logical Arabic letters but not the presentation forms shaping produces would
-         * otherwise pass the Arabic-cmap check and render as tofu boxes. Null (no pending
-         * translation yet) skips the check; post-patch font coverage still reports gaps.
+         * when transforms are active). When supplied, a picked TTF — or, for a bind-only
+         * patch, the existing in-bundle font — is rejected before any repack if it cannot
+         * render this text: a font that covers logical Arabic letters but not the
+         * presentation forms shaping produces would otherwise render as tofu boxes.
+         * Null (no pending translation yet) skips the check; post-patch font coverage
+         * still reports gaps. Coverage is always judged against this text, never
+         * against Arabic/Persian in general.
          */
         expectedShapedText: String? = null,
     ): UnityFontPatchResult = try {
@@ -1037,13 +1037,13 @@ class UnityBundleDocument internal constructor(
 
         val standalone = serialized
         if (standalone != null) {
-            return patchStandaloneFont(standalone, entry, ttfBytes, targetTmpPathId, targetFontPathId)
+            return patchStandaloneFont(standalone, entry, ttfBytes, targetTmpPathId, targetFontPathId, expectedShapedText)
         }
         val embedded = when (val parsed = embedded(entry)) {
             is EmbeddedParse.Failure -> return UnityFontPatchResult.Unavailable(parsed.reason, parsed.diagnostic)
             is EmbeddedParse.Success -> parsed
         }
-        return patchEmbeddedFont(entry, embedded, ttfBytes, targetTmpPathId, targetFontPathId)
+        return patchEmbeddedFont(entry, embedded, ttfBytes, targetTmpPathId, targetFontPathId, expectedShapedText)
     }
 
     private fun patchStandaloneFont(
@@ -1052,6 +1052,7 @@ class UnityBundleDocument internal constructor(
         ttfBytes: ByteArray?,
         targetTmpPathId: Long?,
         targetFontPathId: Long?,
+        expectedShapedText: String?,
     ): UnityFontPatchResult {
         val scratch = dataFile.parentFile ?: throw IOException("Unity cache directory is missing")
         val replacements = LinkedHashMap<String, File>()
@@ -1067,6 +1068,7 @@ class UnityBundleDocument internal constructor(
                     it.classId == UnityFontInspector.MONO_BEHAVIOUR_CLASS_ID
                 }?.pathId,
                 targetFontPathId = targetFontPathId,
+                expectedShapedText = expectedShapedText,
                 tempFiles = tempFiles,
             )
             when (partResult) {
@@ -1100,6 +1102,7 @@ class UnityBundleDocument internal constructor(
         ttfBytes: ByteArray?,
         targetTmpPathId: Long?,
         targetFontPathId: Long?,
+        expectedShapedText: String?,
     ): UnityFontPatchResult {
         val scratch = dataFile.parentFile ?: throw IOException("Unity cache directory is missing")
         val rebuiltEntry = File(scratch, ".font-entry-${System.nanoTime()}.bin")
@@ -1129,6 +1132,7 @@ class UnityBundleDocument internal constructor(
                             ttfBytes = ttfBytes,
                             targetTmpPathId = targetTmpPathId,
                             targetFontPathId = targetFontPathId,
+                            expectedShapedText = expectedShapedText,
                             tempFiles = tempFiles,
                         )
                         when (outcome) {
@@ -1205,6 +1209,7 @@ class UnityBundleDocument internal constructor(
         targetTmpPathId: Long?,
         targetFontPathId: Long?,
         tempFiles: MutableList<File>,
+        expectedShapedText: String?,
     ): PartFontPatchOutcome {
         val entriesByName = entries.associateBy { it.name }
         val fontSlots = index.slots.filter { it.classId == UnityFontInspector.FONT_CLASS_ID }
@@ -1290,12 +1295,20 @@ class UnityBundleDocument internal constructor(
                 tempFiles += fontFile
                 replacements[chosenFontSlot.entryName] = fontFile
             } else {
+                // Bind-only: no TTF is supplied, so the existing in-bundle font is
+                // kept. It is only rejected when a pending translation text is known
+                // and the font cannot render it — never merely for lacking
+                // Arabic/Persian glyphs. Without pending text, binding to a font for
+                // any other script is the caller's explicit choice.
                 val existingBytes = UnityFontInspector.extractFontDataBytes(fontStruct)
-                if (!TtfCmapInspector.supportsArabicScript(existingBytes)) {
-                    return PartFontPatchOutcome.Unavailable(
-                        UnityTextUnavailableReason.FONT_NO_GLYPHS,
-                        "In-bundle Font #${chosenFontSlot.pathId} does not contain Arabic/Persian glyphs; supply a TTF font",
-                    )
+                if (expectedShapedText != null) {
+                    val missing = TtfCmapInspector.missingCodepoints(existingBytes, expectedShapedText)
+                    if (missing.isNotEmpty()) {
+                        return PartFontPatchOutcome.Unavailable(
+                            UnityTextUnavailableReason.FONT_NO_GLYPHS,
+                            "In-bundle Font #${chosenFontSlot.pathId} is missing ${missing.size} glyph(s) required by the pending translation; supply a TTF font",
+                        )
+                    }
                 }
             }
 

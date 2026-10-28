@@ -552,13 +552,16 @@ internal object UnityFontInspector {
         validateTmpFontAssetInvariants(tmpStruct, sameFileSlots)
     }
 
-    /** Replaces `m_FontData` inside a decoded raw `Font` (`classId = 128`) [fontStruct]. */
+    /**
+     * Replaces `m_FontData` inside a decoded raw `Font` (`classId = 128`) [fontStruct]
+     * with any valid sfnt font. Script coverage is the caller's guard (enforced
+     * against the pending translation text when one exists); this function itself
+     * must not assume Arabic/Persian, so translators for other scripts — or a
+     * re-application of the game's own font — are not blocked here.
+     */
     fun replaceRawFontData(fontStruct: UVal.Struct, ttfBytes: ByteArray) {
         if (!TtfCmapInspector.isValidFontHeader(ttfBytes)) {
             throw UnityFormatException("Supplied font file is not a valid TrueType/OpenType (sfnt) font")
-        }
-        if (!TtfCmapInspector.supportsArabicScript(ttfBytes)) {
-            throw UnityFormatException("Supplied font file does not contain Arabic/Persian glyphs in its cmap table")
         }
         val existing = fontStruct.fields["m_FontData"]
             ?: throw UnityFormatException("Font object is missing m_FontData")

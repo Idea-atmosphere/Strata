@@ -466,11 +466,48 @@ class UnityFontAndShapingTest {
     }
 
     @Test
-    fun rejectsTtfWithoutArabicGlyphsWhenPatchingRawFonts() {
+    fun acceptsTtfWithoutArabicGlyphsWhenNoShapedTextIsPending() {
+        // No pending translation text: a Latin-only font (e.g. a translator working
+        // on another script, or the game's own font re-applied) must not be blocked
+        // merely for lacking Arabic/Persian glyphs.
         val asciiOnlyTtf = buildMinimalTtfWithCmap(ranges = listOf(0x0020..0x007E))
         val file = writeFontSerializedFile(
             root = temp.root,
-            name = "raw-reject.assets",
+            name = "raw-ascii-allowed.assets",
+            tmpAssets = emptyList(),
+            rawFonts = listOf(
+                SyntheticRawFont(pathId = 400L, name = "NotoSans-Regular", fontData = ByteArray(16)),
+            ),
+        )
+
+        UnityBundleReader.open(file, File(temp.root, "cache")).use { document ->
+            val patchResult = document.patchRawFonts(
+                entry = document.summary.entries.first(),
+                ttfBytes = asciiOnlyTtf,
+            )
+            assertThat(patchResult).isInstanceOf(UnityFontPatchResult.Success::class.java)
+            val success = patchResult as UnityFontPatchResult.Success
+            assertThat(success.patchedRawFonts).isEqualTo(1)
+            assertThat(success.boundFontPathId).isEqualTo(400L)
+
+            val rebuiltFile = File(temp.root, "raw-ascii-patched.assets")
+            rebuiltFile.writeBytes(success.rebuiltEntryBytes)
+            UnityBundleReader.open(rebuiltFile, File(temp.root, "cache")).use { rebuilt ->
+                val raw = rebuilt.inspectFonts().rawFonts.single()
+                assertThat(raw.embeddedFontBytes).isEqualTo(asciiOnlyTtf.size)
+                assertThat(raw.supportsArabicCmap).isFalse()
+            }
+        }
+    }
+
+    @Test
+    fun rejectsTtfWithoutPendingTextCodepointsWhenPatchingRawFonts() {
+        // The coverage guard moved, not away: with pending text, a font that cannot
+        // render that text — whatever its script — is still rejected.
+        val asciiOnlyTtf = buildMinimalTtfWithCmap(ranges = listOf(0x0020..0x007E))
+        val file = writeFontSerializedFile(
+            root = temp.root,
+            name = "raw-pending-gap.assets",
             tmpAssets = emptyList(),
             rawFonts = listOf(
                 SyntheticRawFont(pathId = 400L, name = "NotoSans-Regular", fontData = ByteArray(16)),
@@ -481,6 +518,7 @@ class UnityFontAndShapingTest {
             val result = document.patchRawFonts(
                 entry = document.summary.entries.first(),
                 ttfBytes = asciiOnlyTtf,
+                expectedShapedText = "سلام",
             )
             assertThat(result).isInstanceOf(UnityFontPatchResult.Unavailable::class.java)
             val unavailable = result as UnityFontPatchResult.Unavailable
@@ -506,6 +544,81 @@ class UnityFontAndShapingTest {
                 entry = document.summary.entries.first(),
                 ttfBytes = logicalOnlyTtf,
                 expectedShapedText = "\uFEE3\uFBFD",
+            )
+            assertThat(result).isInstanceOf(UnityFontPatchResult.Unavailable::class.java)
+            val unavailable = result as UnityFontPatchResult.Unavailable
+            assertThat(unavailable.reason).isEqualTo(UnityTextUnavailableReason.FONT_NO_GLYPHS)
+        }
+    }
+
+    @Test
+    fun bindsTmpToNonArabicFontWhenNoShapedTextIsPending() {
+        // Bind-only with no pending text: binding a static TMP asset to an existing
+        // Latin-only font must succeed — the Arabic assumption must not block
+        // translators working on other scripts.
+        val asciiOnlyTtf = buildMinimalTtfWithCmap(ranges = listOf(0x0020..0x007E))
+        val file = writeFontSerializedFile(
+            root = temp.root,
+            name = "bind-latin-allowed.assets",
+            tmpAssets = listOf(
+                SyntheticTmpAsset(
+                    pathId = 300L,
+                    name = "BodyFont SDF",
+                    populationMode = 0,
+                    sourceFontFileId = 0,
+                    sourceFontPathId = 0L,
+                    codepoints = listOf(0x0041, 0x0042),
+                ),
+            ),
+            rawFonts = listOf(
+                SyntheticRawFont(pathId = 400L, name = "NotoSans-Regular", fontData = asciiOnlyTtf),
+            ),
+        )
+
+        UnityBundleReader.open(file, File(temp.root, "cache")).use { document ->
+            val patchResult = document.patchFontForDynamicGeneration(
+                entry = document.summary.entries.first(),
+                ttfBytes = null,
+            )
+            assertThat(patchResult).isInstanceOf(UnityFontPatchResult.Success::class.java)
+            val success = patchResult as UnityFontPatchResult.Success
+            assertThat(success.patchedTmpAssets).isEqualTo(1)
+            assertThat(success.boundFontPathId).isEqualTo(400L)
+
+            val updatedTmp = success.updatedReport.tmpFontAssets.single()
+            assertThat(updatedTmp.populationMode).isEqualTo(UnityFontPopulationMode.DYNAMIC)
+            assertThat(updatedTmp.sourceFontPathId).isEqualTo(400L)
+            assertThat(updatedTmp.sourceFontSupportsArabic).isFalse()
+            assertThat(updatedTmp.statusReason).isNull()
+        }
+    }
+
+    @Test
+    fun rejectsBindOnlyWhenExistingFontMissesPendingTextCodepoints() {
+        val asciiOnlyTtf = buildMinimalTtfWithCmap(ranges = listOf(0x0020..0x007E))
+        val file = writeFontSerializedFile(
+            root = temp.root,
+            name = "bind-pending-gap.assets",
+            tmpAssets = listOf(
+                SyntheticTmpAsset(
+                    pathId = 300L,
+                    name = "BodyFont SDF",
+                    populationMode = 0,
+                    sourceFontFileId = 0,
+                    sourceFontPathId = 0L,
+                    codepoints = listOf(0x0041, 0x0042),
+                ),
+            ),
+            rawFonts = listOf(
+                SyntheticRawFont(pathId = 400L, name = "NotoSans-Regular", fontData = asciiOnlyTtf),
+            ),
+        )
+
+        UnityBundleReader.open(file, File(temp.root, "cache")).use { document ->
+            val result = document.patchFontForDynamicGeneration(
+                entry = document.summary.entries.first(),
+                ttfBytes = null,
+                expectedShapedText = "سلام",
             )
             assertThat(result).isInstanceOf(UnityFontPatchResult.Unavailable::class.java)
             val unavailable = result as UnityFontPatchResult.Unavailable
