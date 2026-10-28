@@ -65,6 +65,8 @@
     <string name="unity_font_rewrite_warning_title">بازنویسی بسته برای تغییر فونت؟</string>
     <string name="unity_font_rewrite_warning_body">اصلاح فونت در %1$s نیازمند بازخوانی و فشرده‌سازی LZ4 حدود %2$s دادهٔ موقت است (زمان تخمینی %3$d تا %4$d ثانیه).</string>
     <string name="unity_font_patch_done">‏%1$d فونت TMP به حالت پویا (Dynamic) تبدیل شد. برای ذخیره، بسته را بازسازی کنید.</string>
+    <string name="unity_font_replace_raw">جایگزینی TTF فونت خام…</string>
+    <string name="unity_font_raw_patch_done">دادهٔ TTF در %1$d فونت خام جایگزین شد. برای ذخیره، بسته را بازسازی کنید.</string>
     <string name="unity_discovery_apk_action">یافتن ترجمه‌های Unity</string>
     <string name="unity_discovery_budget_bytes">پویش در سقف حجم منبع متوقف شد.</string>
     <string name="unity_discovery_budget_file">پویش در سقف تعداد فایل یا ورودی آرشیو متوقف شد.</string>

@@ -65,6 +65,8 @@
     <string name="unity_font_rewrite_warning_title">Rewrite bundle for font update?</string>
     <string name="unity_font_rewrite_warning_body">Patching fonts in %1$s requires restreaming and LZ4-compressing %2$s of temporary data (estimated %3$d–%4$d s).</string>
     <string name="unity_font_patch_done">Patched %1$d TMP font asset(s) to Dynamic mode. Rebuild the bundle to save.</string>
+    <string name="unity_font_replace_raw">Replace raw font TTF…</string>
+    <string name="unity_font_raw_patch_done">Replaced TTF data in %1$d raw font(s). Rebuild the bundle to save.</string>
     <string name="unity_discovery_apk_action">Discover Unity translations</string>
     <string name="unity_discovery_budget_bytes">Discovery stopped at the source-byte budget.</string>
     <string name="unity_discovery_budget_file">Discovery stopped at the file or archive-entry budget.</string>

@@ -114,6 +114,7 @@ fun UnityAssetScreen(
     var localBusy by remember(path) { mutableStateOf(false) }
     var signPrompt by remember(path) { mutableStateOf(false) }
     var fontRewritePrompt by remember(path) { mutableStateOf<UnityBundleRewriteEstimate?>(null) }
+    var pendingRawFontTarget by remember(path) { mutableStateOf<Long?>(null) }
     var addLanguagePrompt by remember(path) { mutableStateOf(false) }
     var showDiscovery by rememberSaveable(path) { mutableStateOf(false) }
     var discoveryStaging by remember(path) { mutableStateOf(false) }
@@ -243,6 +244,14 @@ fun UnityAssetScreen(
         if (uri != null && entry != null) {
             vm.applyDynamicFont(entry, uri, context.contentResolver)
         }
+    }
+
+    val rawFontTtfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        val entry = selectedEntry
+        if (uri != null && entry != null) {
+            vm.applyRawFont(entry, uri, context.contentResolver, pendingRawFontTarget)
+        }
+        pendingRawFontTarget = null
     }
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -440,6 +449,15 @@ fun UnityAssetScreen(
                                                         fontTtfPicker.launch(arrayOf("*/*"))
                                                     }
                                                 },
+                                                onReplaceRawFont = { pathId ->
+                                                    pendingRawFontTarget = pathId
+                                                    val estimate = vm.estimateRewrite()
+                                                    if (estimate != null) {
+                                                        fontRewritePrompt = estimate
+                                                    } else {
+                                                        rawFontTtfPicker.launch(arrayOf("*/*"))
+                                                    }
+                                                },
                                                 fontReport = state.fontReports[entry.name],
                                                 textTransformOptions = state.textTransformOptions,
                                                 onToggleShapeArabic = vm::setShapeArabic,
@@ -635,7 +653,10 @@ fun UnityAssetScreen(
 
     fontRewritePrompt?.let { estimate ->
         AlertDialog(
-            onDismissRequest = { fontRewritePrompt = null },
+            onDismissRequest = {
+                fontRewritePrompt = null
+                pendingRawFontTarget = null
+            },
             title = { Text(stringResource(R.string.unity_font_rewrite_warning_title)) },
             text = {
                 Text(
@@ -651,11 +672,28 @@ fun UnityAssetScreen(
             confirmButton = {
                 TextButton(onClick = {
                     fontRewritePrompt = null
-                    fontTtfPicker.launch(arrayOf("*/*"))
-                }) { Text(stringResource(R.string.unity_font_enable_dynamic)) }
+                    if (pendingRawFontTarget != null) {
+                        rawFontTtfPicker.launch(arrayOf("*/*"))
+                    } else {
+                        fontTtfPicker.launch(arrayOf("*/*"))
+                    }
+                }) {
+                    Text(
+                        stringResource(
+                            if (pendingRawFontTarget != null) {
+                                R.string.unity_font_replace_raw
+                            } else {
+                                R.string.unity_font_enable_dynamic
+                            },
+                        ),
+                    )
+                }
             },
             dismissButton = {
-                TextButton(onClick = { fontRewritePrompt = null }) {
+                TextButton(onClick = {
+                    fontRewritePrompt = null
+                    pendingRawFontTarget = null
+                }) {
                     Text(stringResource(R.string.common_cancel))
                 }
             },
@@ -725,6 +763,7 @@ private fun UnityEntryActions(
     onExportTexts: (() -> Unit)? = null,
     onInspectFonts: (() -> Unit)? = null,
     onBindDynamicFont: (() -> Unit)? = null,
+    onReplaceRawFont: ((Long) -> Unit)? = null,
     fontReport: UnityFontReport? = null,
     textTransformOptions: UnityTextTransformOptions = UnityTextTransformOptions(),
     onToggleShapeArabic: ((Boolean) -> Unit)? = null,
@@ -774,6 +813,27 @@ private fun UnityEntryActions(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                         modifier = Modifier.padding(top = 2.dp),
                     )
+                }
+                fontReport.rawFonts.forEach { raw ->
+                    Row(
+                        Modifier.fillMaxWidth().padding(top = 2.dp),
+                        verticalAlignment = Alignment.CenterVertically,
+                    ) {
+                        Text(
+                            isolated("${raw.name} (${Formatters.size(raw.embeddedFontBytes.toLong())})"),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            modifier = Modifier.weight(1f),
+                        )
+                        if (onReplaceRawFont != null) {
+                            TextButton(
+                                onClick = { onReplaceRawFont(raw.pathId) },
+                                enabled = !busy,
+                            ) {
+                                Text(stringResource(R.string.unity_font_replace_raw), maxLines = 1)
+                            }
+                        }
+                    }
                 }
             }
             Row(Modifier.fillMaxWidth().padding(top = 8.dp), horizontalArrangement = Arrangement.spacedBy(6.dp)) {

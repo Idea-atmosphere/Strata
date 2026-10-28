@@ -157,6 +157,7 @@ sealed class UnityFontPatchResult {
         val patchedTmpAssets: Int,
         val boundFontPathId: Long,
         val updatedReport: UnityFontReport,
+        val patchedRawFonts: Int = 0,
     ) : UnityFontPatchResult()
 
     data class Unavailable(

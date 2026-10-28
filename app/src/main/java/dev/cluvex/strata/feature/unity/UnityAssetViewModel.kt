@@ -1608,6 +1608,41 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /** Writes a patched font entry to the stage dir, overlaying staged localization tables when the entry already carries them. */
+    private fun stagePatchedFontEntry(
+        entry: UnityBundleEntry,
+        rebuiltEntryBytes: ByteArray,
+        preserveLocalization: Boolean,
+        localizationTables: List<LocalizationSource>,
+        dir: File,
+    ): File {
+        val fontBase = File(
+            dir,
+            "font-base-${entry.name.hashCode().toUInt().toString(16)}-${System.nanoTime()}.bin",
+        )
+        fontBase.writeBytes(rebuiltEntryBytes)
+        if (!preserveLocalization) {
+            return fontBase
+        }
+        if (localizationTables.isEmpty()) {
+            fontBase.delete()
+            throw UnityFormatException(
+                "Staged localization tables are unavailable for font overlay",
+            )
+        }
+        val composed = File(
+            dir,
+            "font-localization-${entry.name.hashCode().toUInt().toString(16)}-${System.nanoTime()}.bin",
+        )
+        try {
+            UnityLocalizationOverlay.write(fontBase, localizationTables, composed, dir)
+            verifyLocalizationRoundTrip(composed, localizationTables, dir)
+            return composed
+        } finally {
+            fontBase.delete()
+        }
+    }
+
     fun applyDynamicFont(entry: UnityBundleEntry, ttfUri: Uri?, resolver: ContentResolver) {
         val doc = document ?: return
         val dir = stageDir ?: return
@@ -1651,32 +1686,13 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                 when (outcome) {
                     is UnityFontPatchResult.Success -> {
                         val staged = runInterruptible(Dispatchers.IO) {
-                            val fontBase = File(
+                            stagePatchedFontEntry(
+                                entry,
+                                outcome.rebuiltEntryBytes,
+                                preserveLocalization,
+                                localizationTables,
                                 dir,
-                                "font-base-${entry.name.hashCode().toUInt().toString(16)}-${System.nanoTime()}.bin",
                             )
-                            fontBase.writeBytes(outcome.rebuiltEntryBytes)
-                            if (!preserveLocalization) {
-                                fontBase
-                            } else {
-                                if (localizationTables.isEmpty()) {
-                                    fontBase.delete()
-                                    throw UnityFormatException(
-                                        "Staged localization tables are unavailable for font overlay",
-                                    )
-                                }
-                                val composed = File(
-                                    dir,
-                                    "font-localization-${entry.name.hashCode().toUInt().toString(16)}-${System.nanoTime()}.bin",
-                                )
-                                try {
-                                    UnityLocalizationOverlay.write(fontBase, localizationTables, composed, dir)
-                                    verifyLocalizationRoundTrip(composed, localizationTables, dir)
-                                    composed
-                                } finally {
-                                    fontBase.delete()
-                                }
-                            }
                         }
                         _state.update {
                             withTranslationDerived(
@@ -1697,6 +1713,115 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                                     message = getApplication<Application>().getString(
                                         R.string.unity_font_patch_done,
                                         outcome.patchedTmpAssets,
+                                    ),
+                                ),
+                            )
+                        }
+                    }
+                    is UnityFontPatchResult.Unavailable -> {
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                textIssues = it.textIssues + (entry.name to outcome.reason),
+                                message = outcome.diagnostic,
+                            )
+                        }
+                    }
+                }
+            } catch (e: CancellationException) {
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                    )
+                }
+                throw e
+            } catch (e: Exception) {
+                val detail = e.message?.takeIf { it.isNotBlank() }
+                val message = when {
+                    e is UnityDocumentClosedException -> getApplication<Application>().getString(R.string.unity_staging_unavailable)
+                    e is UnityOperationCancelledException -> getApplication<Application>().getString(R.string.unity_operation_cancelled)
+                    detail != null -> getApplication<Application>().getString(R.string.unity_operation_failed_detail, detail)
+                    else -> getApplication<Application>().getString(R.string.unity_operation_failed)
+                }
+                _state.update { it.copy(busy = false, message = message) }
+            }
+        }
+    }
+
+    /**
+     * Replaces the embedded TTF data of raw Font object(s) in [entry] with the picked font.
+     * Unlike [applyDynamicFont] this needs no TMP_FontAsset: it serves games whose UI renders
+     * with legacy Unity Text. When [targetFontPathId] is null every Font in the entry is
+     * replaced; otherwise only that Font is. The same shaped-text coverage guard as the
+     * dynamic path applies, so a font that cannot render the pending translation is rejected
+     * before any repack.
+     */
+    fun applyRawFont(entry: UnityBundleEntry, ttfUri: Uri?, resolver: ContentResolver, targetFontPathId: Long? = null) {
+        val doc = document ?: return
+        val dir = stageDir ?: return
+        if (ttfUri == null) return
+        val startingState = _state.value
+        if (startingState.busy) return
+        val preserveLocalization = entry.name in startingState.localizationReplacementEntries
+        val localizationTables = startingState.localizationSources[entry.name].orEmpty()
+        // Same shaped-text guard as the dynamic path: when a pending translation exists and
+        // transforms are active, the picked font must cover the shaped text the game will
+        // render — not just the logical letters.
+        val expectedShapedText = if (startingState.textTransformOptions.isEnabled) {
+            val source = pendingLocalizationSource(startingState)
+            val target = startingState.localizationTargetLanguageCode
+            val targetIndex = source?.let { it.languageIndex(target ?: "") } ?: -1
+            if (source != null && targetIndex >= 0) {
+                source.terms.mapNotNull { term ->
+                    term.values[targetIndex]?.let {
+                        UnityLocalizationTsv.transformPreservingDirectives(it, startingState.textTransformOptions)
+                    }
+                }.joinToString("\n").takeIf { it.isNotEmpty() }
+            } else {
+                null
+            }
+        } else {
+            null
+        }
+        _state.update { it.copy(busy = true) }
+        viewModelScope.launch {
+            try {
+                val outcome = runInterruptible(Dispatchers.IO) {
+                    val ttfBytes = resolver.openInputStream(ttfUri)?.use { it.readBytes() }
+                        ?: throw IOException("Could not open selected TTF font")
+                    doc.patchRawFonts(entry, ttfBytes, targetFontPathId, expectedShapedText)
+                }
+                when (outcome) {
+                    is UnityFontPatchResult.Success -> {
+                        val staged = runInterruptible(Dispatchers.IO) {
+                            stagePatchedFontEntry(
+                                entry,
+                                outcome.rebuiltEntryBytes,
+                                preserveLocalization,
+                                localizationTables,
+                                dir,
+                            )
+                        }
+                        _state.update {
+                            withTranslationDerived(
+                                it.copy(
+                                    busy = false,
+                                    replacements = it.replacements + (entry.name to staged),
+                                    fontReports = it.fontReports + (entry.name to outcome.updatedReport),
+                                    localizationRoundTripStatus = if (preserveLocalization) {
+                                        UnityLocalizationRoundTripStatus.PASSED
+                                    } else {
+                                        UnityLocalizationRoundTripStatus.NOT_RUN
+                                    },
+                                    localizationRoundTripDetail = if (preserveLocalization) {
+                                        getApplication<Application>().getString(R.string.unity_round_trip_verified)
+                                    } else {
+                                        null
+                                    },
+                                    message = getApplication<Application>().getString(
+                                        R.string.unity_font_raw_patch_done,
+                                        outcome.patchedRawFonts,
                                     ),
                                 ),
                             )
