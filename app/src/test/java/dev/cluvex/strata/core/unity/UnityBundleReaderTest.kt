@@ -546,13 +546,14 @@ class UnityBundleReaderTest {
     }
 
     @Test
-    fun rebuiltSerializedFileAlignsEveryObjectStartToFourBytes() {
+    fun rebuiltSerializedFileAlignsEveryObjectStartToEightBytes() {
         val source = writeTypedSerialized(temp.root, "typed-align.assets", typedObjectOne(), typedObjectOne())
         val output = File(temp.root, "typed-align-output.assets")
         UnityBundleReader.open(source, File(temp.root, "cache-align")).use { document ->
             val first = document.summary.entries[0]
             // 41 bytes: an odd-sized replacement. Without start alignment the following
-            // object would land on an unaligned offset, unlike a Unity-written file.
+            // object would land on an unaligned offset, unlike a Unity-written file,
+            // where every object start is 8-aligned.
             val replacement = File(temp.root, "odd-object.bin").apply {
                 writeBytes(typedObjectTwo() + byteArrayOf(0))
             }
@@ -560,9 +561,9 @@ class UnityBundleReaderTest {
         }
         UnityBundleReader.open(output, File(temp.root, "cache-align-output")).use { rebuilt ->
             assertThat(rebuilt.summary.entries[0].size).isEqualTo(41L)
-            assertThat(rebuilt.summary.entries[0].offset % 4L).isEqualTo(0L)
-            assertThat(rebuilt.summary.entries[1].offset).isEqualTo(44L)
-            assertThat(rebuilt.summary.entries[1].offset % 4L).isEqualTo(0L)
+            assertThat(rebuilt.summary.entries[0].offset % 8L).isEqualTo(0L)
+            assertThat(rebuilt.summary.entries[1].offset).isEqualTo(48L)
+            assertThat(rebuilt.summary.entries[1].offset % 8L).isEqualTo(0L)
             assertThat(rebuilt.exportTexts(rebuilt.summary.entries[1])!!["m_Script"]).isEqualTo("print('hi')")
         }
     }
