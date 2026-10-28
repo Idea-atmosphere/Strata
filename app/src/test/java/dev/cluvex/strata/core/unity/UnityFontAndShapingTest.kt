@@ -589,7 +589,11 @@ class UnityFontAndShapingTest {
             assertThat(updatedTmp.populationMode).isEqualTo(UnityFontPopulationMode.DYNAMIC)
             assertThat(updatedTmp.sourceFontPathId).isEqualTo(400L)
             assertThat(updatedTmp.sourceFontSupportsArabic).isFalse()
-            assertThat(updatedTmp.statusReason).isNull()
+            // The bind itself succeeded; the report still (correctly) says this
+            // TMP cannot render Persian, since its source font has no Arabic cmap.
+            // The fix removed the block, not the report.
+            assertThat(updatedTmp.statusReason).isEqualTo(UnityTextUnavailableReason.FONT_NO_GLYPHS)
+            assertThat(success.updatedReport.canRenderPersian).isFalse()
         }
     }
 
