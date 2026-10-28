@@ -409,6 +409,15 @@ internal class SerializedFileIndex(
                 if (TypeTreeCodec.exportStrings(verified.value) != TypeTreeCodec.exportStrings(value)) {
                     throw UnityFormatException("Re-encoded object failed its text round-trip self-check")
                 }
+                // Byte-level round-trip: decoding the encoded bytes and encoding them again
+                // must reproduce the encoded bytes exactly. The strings check above cannot see
+                // corruption in non-string fields (for example a Font's m_FontData), so a codec
+                // fidelity bug would otherwise pass silently and ship a corrupt object.
+                if (tree != null &&
+                    !TypeTreeCodec.encode(tree, verified.value, bigEndian).contentEquals(encoded)
+                ) {
+                    throw UnityFormatException("Re-encoded object failed its byte round-trip self-check")
+                }
             }
         }
         return encoded
@@ -429,8 +438,10 @@ internal class SerializedFileIndex(
 
     /**
      * Writes a new serialized file where entries listed in [replacements] use the replacement
-     * file's bytes. Objects are written sequentially in table order; the object table is patched
-     * in place (fixed width fields) so metadata size and data offset stay valid.
+     * file's bytes. Objects are written sequentially in table order, each starting on a 4-byte
+     * boundary like Unity's own writer (the data section of a Unity-written file pads every
+     * object start to 4 bytes); the object table is patched in place (fixed width fields) so
+     * metadata size and data offset stay valid.
      */
     fun rebuild(output: File, dataFile: File, replacements: Map<String, File>, entries: List<UnityBundleEntry>) {
         if (entries.size != slots.size) throw IOException("Entry list does not match this serialized file")
@@ -445,6 +456,7 @@ internal class SerializedFileIndex(
         slots.forEachIndexed { index, slot ->
             val replacement = replacements[slot.entryName]
             if (replacement != null && !replacement.isFile) throw IOException("Replacement file is missing: ${replacement.name}")
+            if (cursor % 4L != 0L) cursor += 4L - cursor % 4L
             newStarts[index] = cursor
             newSizes[index] = replacement?.length() ?: slot.size
             cursor += newSizes[index]
@@ -480,7 +492,13 @@ internal class SerializedFileIndex(
                 if (padding > 0) out.write(ByteArray(padding.toInt()))
                 RandomAccessFile(dataFile, "r").use { staged ->
                     val buffer = ByteArray(64 * 1024)
+                    var written = 0L
                     slots.forEachIndexed { index, slot ->
+                        val pad = newStarts[index] - written
+                        if (pad > 0) {
+                            out.write(ByteArray(pad.toInt()))
+                            written += pad
+                        }
                         val replacement = replacements[slot.entryName]
                         if (replacement != null) {
                             replacement.inputStream().buffered().use { input ->
@@ -502,6 +520,7 @@ internal class SerializedFileIndex(
                                 left -= read
                             }
                         }
+                        written += newSizes[index]
                     }
                 }
             }

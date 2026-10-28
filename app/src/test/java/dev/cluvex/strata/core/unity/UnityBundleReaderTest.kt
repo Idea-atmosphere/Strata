@@ -546,6 +546,28 @@ class UnityBundleReaderTest {
     }
 
     @Test
+    fun rebuiltSerializedFileAlignsEveryObjectStartToFourBytes() {
+        val source = writeTypedSerialized(temp.root, "typed-align.assets", typedObjectOne(), typedObjectOne())
+        val output = File(temp.root, "typed-align-output.assets")
+        UnityBundleReader.open(source, File(temp.root, "cache-align")).use { document ->
+            val first = document.summary.entries[0]
+            // 41 bytes: an odd-sized replacement. Without start alignment the following
+            // object would land on an unaligned offset, unlike a Unity-written file.
+            val replacement = File(temp.root, "odd-object.bin").apply {
+                writeBytes(typedObjectTwo() + byteArrayOf(0))
+            }
+            document.repack(output, mapOf(first.name to replacement))
+        }
+        UnityBundleReader.open(output, File(temp.root, "cache-align-output")).use { rebuilt ->
+            assertThat(rebuilt.summary.entries[0].size).isEqualTo(41L)
+            assertThat(rebuilt.summary.entries[0].offset % 4L).isEqualTo(0L)
+            assertThat(rebuilt.summary.entries[1].offset).isEqualTo(44L)
+            assertThat(rebuilt.summary.entries[1].offset % 4L).isEqualTo(0L)
+            assertThat(rebuilt.exportTexts(rebuilt.summary.entries[1])!!["m_Script"]).isEqualTo("print('hi')")
+        }
+    }
+
+    @Test
     fun editsSerializedEntryInsideUnityFsBundle() {
         val serialized = writeTypedSerialized(temp.root, "inner.assets", typedObjectOne())
         val source = writeBundle(temp.root, "outer.bundle", serialized.readBytes(), compression = 0)
