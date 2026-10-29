@@ -1744,10 +1744,17 @@ class UnityBundleDocument internal constructor(
     }
 
     /** Writes a normalized UnityFS bundle. Inputs are never overwritten. */
-    fun repack(output: File, replacements: Map<String, File> = emptyMap()) =
-        withOpenDocument { repackOpen(output, replacements) }
+    /**
+     * Rebuilds the bundle (or standalone serialized file) with [replacements] applied.
+     * When [storeUncompressed] is true, UnityFS data blocks are stored raw instead of
+     * LZ4HC-compressed, matching bundles Unity itself ships uncompressed; the block
+     * directory keeps its usual encoding. This is a fidelity/diagnostic option for
+     * loaders that reject the compressed form.
+     */
+    fun repack(output: File, replacements: Map<String, File> = emptyMap(), storeUncompressed: Boolean = false) =
+        withOpenDocument { repackOpen(output, replacements, storeUncompressed) }
 
-    private fun repackOpen(output: File, replacements: Map<String, File>) {
+    private fun repackOpen(output: File, replacements: Map<String, File>, storeUncompressed: Boolean) {
         if (!repackSupported) throw UnityFormatException("This Unity format is read-only; repacking needs a UnityFS bundle or serialized file")
         if (output.canonicalFile == source.canonicalFile) throw IOException("Output must not replace the source bundle")
         if (output.exists()) throw IOException("Output already exists: ${output.name}")
@@ -1755,7 +1762,7 @@ class UnityBundleDocument internal constructor(
         parent.mkdirs()
         val temporary = temporarySibling(output, "repack")
         try {
-            repackTo(temporary, replacements)
+            repackTo(temporary, replacements, storeUncompressed)
             RandomAccessFile(temporary, "rw").use { it.fd.sync() }
             publishTemporary(temporary, output)
         } catch (e: Throwable) {
@@ -1764,7 +1771,7 @@ class UnityBundleDocument internal constructor(
         }
     }
 
-    private fun repackTo(output: File, replacements: Map<String, File>) {
+    private fun repackTo(output: File, replacements: Map<String, File>, storeUncompressed: Boolean) {
         val serializedIndex = serialized
         if (serializedIndex != null) {
             serializedIndex.rebuild(output, dataFile, replacements, summary.entries)
@@ -1819,7 +1826,7 @@ class UnityBundleDocument internal constructor(
             val updated = summary.entries.mapIndexed { index, entry ->
                 entry.copy(offset = outputOffsets[index], size = replacements[entry.name]?.length() ?: entry.size)
             }
-            writeNormalizedUnityFs(staged, output, source, summary, updated, outputCursor, unityFsProfile)
+            writeNormalizedUnityFs(staged, output, source, summary, updated, outputCursor, unityFsProfile, storeUncompressed)
             UnityBundleReader.verifyUnityFsOutput(output, updated, outputCursor, unityFsProfile)
         } catch (e: Throwable) {
             output.delete()
@@ -1894,6 +1901,7 @@ class UnityBundleDocument internal constructor(
             entries: List<UnityBundleEntry>,
             dataSize: Long,
             profile: UnityFsWriteProfile?,
+            storeUncompressed: Boolean = false,
         ) {
             val blockCountLong = if (dataSize == 0L) 0L else 1L + (dataSize - 1) / OUTPUT_BLOCK_SIZE
             if (blockCountLong > MAX_BLOCKS) throw UnityFormatException("UnityFS has too many data blocks")
@@ -1916,10 +1924,14 @@ class UnityBundleDocument internal constructor(
                             val size = minOf(left, OUTPUT_BLOCK_SIZE.toLong()).toInt()
                             readExactly(input, buffer, size)
                             uncompressedDigest?.update(buffer, 0, size)
-                            val encoded = try {
-                                Lz4BlockEncoder.encode(buffer, size)
-                            } catch (_: Exception) {
+                            val encoded = if (storeUncompressed) {
                                 null
+                            } else {
+                                try {
+                                    Lz4BlockEncoder.encode(buffer, size)
+                                } catch (_: Exception) {
+                                    null
+                                }
                             }
                             if (encoded != null && encoded.size < size) {
                                 blockOut.write(encoded)

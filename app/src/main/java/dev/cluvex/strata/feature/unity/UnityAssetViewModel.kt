@@ -1474,7 +1474,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(editedFiles = changed) }
     }
 
-    fun repack(parents: List<ArchiveParent>) {
+    fun repack(parents: List<ArchiveParent>, storeUncompressed: Boolean = false) {
         val doc = document ?: return
         if (!doc.repackSupported) {
             _state.update {
@@ -1501,6 +1501,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                         parents = parents,
                         cacheDir = getApplication<Application>().cacheDir,
                         maxBundleGrowthRatio = if (localizationChanged) 1.25 else null,
+                        storeUncompressed = storeUncompressed,
                     )
                     val isApk = file.extension.equals("apk", ignoreCase = true)
                     val signature = if (isApk) ApkSignatureInspector.inspect(file) else null

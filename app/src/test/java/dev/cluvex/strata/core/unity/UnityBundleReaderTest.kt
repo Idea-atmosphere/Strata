@@ -282,6 +282,32 @@ class UnityBundleReaderTest {
     }
 
     @Test
+    fun repackStoresDataBlocksUncompressedWhenRequested() {
+        val blockSize = 128 * 1024
+        val contents = ByteArray(blockSize * 2) { (it % 13).toByte() }
+        val source = writeBundle(temp.root, "raw-blocks-source.bundle", contents, compression = 0)
+
+        val compressed = File(temp.root, "raw-blocks-compressed.bundle")
+        UnityBundleReader.open(source, File(temp.root, "cache-raw-default")).use { it.repack(compressed) }
+        val compressedTable = readBundleTable(compressed)
+        assertThat(compressedTable.blocks.map { it.codec }).containsExactly(3, 3).inOrder()
+        assertThat(compressed.length()).isLessThan(contents.size.toLong())
+
+        val raw = File(temp.root, "raw-blocks-plain.bundle")
+        UnityBundleReader.open(source, File(temp.root, "cache-raw-plain")).use { it.repack(raw, storeUncompressed = true) }
+        val rawTable = readBundleTable(raw)
+        assertThat(rawTable.blocks.map { it.codec }).containsExactly(0, 0).inOrder()
+        assertThat(rawTable.blocks.map { it.uncompressed }).containsExactly(blockSize, blockSize).inOrder()
+        assertThat(rawTable.blocks.map { it.compressed }).containsExactly(blockSize, blockSize).inOrder()
+        assertThat(raw.length()).isAtLeast(contents.size.toLong())
+        UnityBundleReader.open(raw, File(temp.root, "cache-raw-verify")).use { document ->
+            val extracted = File(temp.root, "raw-blocks-extracted.bin")
+            document.copyEntry(document.summary.entries.single(), extracted)
+            assertThat(extracted.readBytes()).isEqualTo(contents)
+        }
+    }
+
+    @Test
     fun repackCarriesSourceHashConvention() {
         val contents = ByteArray(180_000) { (it % 79).toByte() }
         val replacementBytes = ByteArray(190_000) { (it % 83).toByte() }

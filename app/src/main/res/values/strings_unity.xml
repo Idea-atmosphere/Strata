@@ -67,6 +67,7 @@
     <string name="unity_font_patch_done">Patched %1$d TMP font asset(s) to Dynamic mode. Rebuild the bundle to save.</string>
     <string name="unity_font_replace_raw">Replace raw font TTF…</string>
     <string name="unity_font_raw_patch_done">Replaced TTF data in %1$d raw font(s). Rebuild the bundle to save.</string>
+    <string name="unity_repack_store_uncompressed">Store data blocks uncompressed</string>
     <string name="unity_discovery_apk_action">Discover Unity translations</string>
     <string name="unity_discovery_budget_bytes">Discovery stopped at the source-byte budget.</string>
     <string name="unity_discovery_budget_file">Discovery stopped at the file or archive-entry budget.</string>

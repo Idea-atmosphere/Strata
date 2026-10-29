@@ -27,6 +27,7 @@ object UnityPackageRepacker {
         parents: List<ArchiveParent>,
         cacheDir: File,
         maxBundleGrowthRatio: Double?,
+        storeUncompressed: Boolean = false,
     ): File {
         cacheDir.mkdirs()
         val tempDir = File(cacheDir, "unity-repack-${System.nanoTime()}")
@@ -40,7 +41,7 @@ object UnityPackageRepacker {
             } else {
                 File(tempDir, "rebuilt-bundle.${document.source.extension.ifEmpty { "bundle" }}")
             }
-            document.repack(bundle, replacements)
+            document.repack(bundle, replacements, storeUncompressed)
             if (maxBundleGrowthRatio != null) {
                 try {
                     UnityLocalizationOperations.verifyBundleGrowth(
