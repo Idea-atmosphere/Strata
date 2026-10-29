@@ -955,16 +955,19 @@ class UnityBundleDocument internal constructor(
      * only font path that serves them. When [targetFontPathId] is null every Font in the entry
      * is replaced; otherwise only the Font with that path id is. The same picked-TTF guards
      * as the dynamic path apply, including the shaped-text gap check when
-     * [expectedShapedText] is supplied.
+     * [expectedShapedText] is supplied. When [mergeWithExisting] is true the picked
+     * file is merged into each Font's existing data instead of replacing it, and the
+     * gap check is judged on the merged face.
      */
     fun patchRawFonts(
         entry: UnityBundleEntry,
         ttfBytes: ByteArray,
         targetFontPathId: Long? = null,
         expectedShapedText: String? = null,
+        mergeWithExisting: Boolean = false,
     ): UnityFontPatchResult = try {
         withOpenDocument {
-            patchRawFontsOpen(entry, ttfBytes, targetFontPathId, expectedShapedText)
+            patchRawFontsOpen(entry, ttfBytes, targetFontPathId, expectedShapedText, mergeWithExisting)
         }
     } catch (_: UnityDocumentClosedException) {
         UnityFontPatchResult.Unavailable(
@@ -978,19 +981,32 @@ class UnityBundleDocument internal constructor(
         ttfBytes: ByteArray,
         targetFontPathId: Long?,
         expectedShapedText: String?,
+        mergeWithExisting: Boolean,
     ): UnityFontPatchResult {
         requireEntry(entry)
-        validatePickedTtf(ttfBytes, expectedShapedText)?.let { return it }
+        if (mergeWithExisting) {
+            // Coverage is judged per Font on the merged face inside
+            // buildPartRawFontReplacements; here only the picked file's header
+            // is checked so a mergeable but non-covering file still reaches it.
+            if (!TtfCmapInspector.isValidFontHeader(ttfBytes)) {
+                return UnityFontPatchResult.Unavailable(
+                    UnityTextUnavailableReason.DECODE_FAILED,
+                    "Supplied font file is not a valid TrueType/OpenType (sfnt) font",
+                )
+            }
+        } else {
+            validatePickedTtf(ttfBytes, expectedShapedText)?.let { return it }
+        }
 
         val standalone = serialized
         if (standalone != null) {
-            return patchStandaloneRawFonts(standalone, entry, ttfBytes, targetFontPathId)
+            return patchStandaloneRawFonts(standalone, entry, ttfBytes, targetFontPathId, mergeWithExisting, expectedShapedText)
         }
         val embedded = when (val parsed = embedded(entry)) {
             is EmbeddedParse.Failure -> return UnityFontPatchResult.Unavailable(parsed.reason, parsed.diagnostic)
             is EmbeddedParse.Success -> parsed
         }
-        return patchEmbeddedRawFonts(entry, embedded, ttfBytes, targetFontPathId)
+        return patchEmbeddedRawFonts(entry, embedded, ttfBytes, targetFontPathId, mergeWithExisting, expectedShapedText)
     }
 
     /**
@@ -1382,6 +1398,8 @@ class UnityBundleDocument internal constructor(
         ttfBytes: ByteArray,
         targetFontPathId: Long?,
         tempFiles: MutableList<File>,
+        mergeWithExisting: Boolean = false,
+        expectedShapedText: String? = null,
     ): PartFontPatchOutcome {
         val entriesByName = entries.associateBy { it.name }
         val fontSlots = index.slots.filter { slot ->
@@ -1414,7 +1432,32 @@ class UnityBundleDocument internal constructor(
                     UnityTextUnavailableReason.DECODE_FAILED,
                     "Could not decode Font #${slot.pathId}",
                 )
-            UnityFontInspector.replaceRawFontData(fontStruct, ttfBytes)
+            if (mergeWithExisting) {
+                try {
+                    UnityFontInspector.mergeRawFontData(fontStruct, ttfBytes)
+                } catch (error: UnityFormatException) {
+                    return PartFontPatchOutcome.Unavailable(
+                        UnityTextUnavailableReason.DECODE_FAILED,
+                        error.message ?: "Picked font cannot be merged into Font #${slot.pathId}",
+                    )
+                }
+                if (expectedShapedText != null) {
+                    val mergedBytes = UnityFontInspector.extractFontDataBytes(fontStruct)
+                    val missing = TtfCmapInspector.missingCodepoints(mergedBytes, expectedShapedText)
+                    if (missing.isNotEmpty()) {
+                        val shown = missing.sorted().take(32).joinToString(",") {
+                            "U+${it.toString(16).uppercase().padStart(4, '0')}"
+                        }
+                        val suffix = if (missing.size > 32) ",…" else ""
+                        return PartFontPatchOutcome.Unavailable(
+                            UnityTextUnavailableReason.FONT_NO_GLYPHS,
+                            "Merged font is missing ${missing.size} glyph(s) required by the pending translation: $shown$suffix",
+                        )
+                    }
+                }
+            } else {
+                UnityFontInspector.replaceRawFontData(fontStruct, ttfBytes)
+            }
             val encodedFont = index.encode(dataFile, fontEntry, fontStruct)
             val fontFile = File(scratch, ".rawfont-obj-$partIndex-${slot.pathId}-${System.nanoTime()}.bin")
             fontFile.writeBytes(encodedFont)
@@ -1434,6 +1477,8 @@ class UnityBundleDocument internal constructor(
         selectedEntry: UnityBundleEntry,
         ttfBytes: ByteArray,
         targetFontPathId: Long?,
+        mergeWithExisting: Boolean = false,
+        expectedShapedText: String? = null,
     ): UnityFontPatchResult {
         val scratch = dataFile.parentFile ?: throw IOException("Unity cache directory is missing")
         val replacements = LinkedHashMap<String, File>()
@@ -1447,6 +1492,8 @@ class UnityBundleDocument internal constructor(
                 ttfBytes = ttfBytes,
                 targetFontPathId = targetFontPathId,
                 tempFiles = tempFiles,
+                mergeWithExisting = mergeWithExisting,
+                expectedShapedText = expectedShapedText,
             )
             when (partResult) {
                 is PartFontPatchOutcome.Unavailable -> return UnityFontPatchResult.Unavailable(partResult.reason, partResult.diagnostic)
@@ -1479,6 +1526,8 @@ class UnityBundleDocument internal constructor(
         embedded: EmbeddedParse.Success,
         ttfBytes: ByteArray,
         targetFontPathId: Long?,
+        mergeWithExisting: Boolean = false,
+        expectedShapedText: String? = null,
     ): UnityFontPatchResult {
         val scratch = dataFile.parentFile ?: throw IOException("Unity cache directory is missing")
         val rebuiltEntry = File(scratch, ".rawfont-entry-${System.nanoTime()}.bin")
@@ -1508,6 +1557,8 @@ class UnityBundleDocument internal constructor(
                             ttfBytes = ttfBytes,
                             targetFontPathId = targetFontPathId,
                             tempFiles = tempFiles,
+                            mergeWithExisting = mergeWithExisting,
+                            expectedShapedText = expectedShapedText,
                         )
                         when (outcome) {
                             is PartFontPatchOutcome.Unavailable -> {

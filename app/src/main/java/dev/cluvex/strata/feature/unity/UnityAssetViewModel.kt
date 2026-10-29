@@ -1763,7 +1763,13 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
      * dynamic path applies, so a font that cannot render the pending translation is rejected
      * before any repack.
      */
-    fun applyRawFont(entry: UnityBundleEntry, ttfUri: Uri?, resolver: ContentResolver, targetFontPathId: Long? = null) {
+    fun applyRawFont(
+        entry: UnityBundleEntry,
+        ttfUri: Uri?,
+        resolver: ContentResolver,
+        targetFontPathId: Long? = null,
+        mergeWithExisting: Boolean = false,
+    ) {
         val doc = document ?: return
         val dir = stageDir ?: return
         if (ttfUri == null) return
@@ -1796,7 +1802,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                 val outcome = runInterruptible(Dispatchers.IO) {
                     val ttfBytes = resolver.openInputStream(ttfUri)?.use { it.readBytes() }
                         ?: throw IOException("Could not open selected TTF font")
-                    doc.patchRawFonts(entry, ttfBytes, targetFontPathId, expectedShapedText)
+                    doc.patchRawFonts(entry, ttfBytes, targetFontPathId, expectedShapedText, mergeWithExisting)
                 }
                 when (outcome) {
                     is UnityFontPatchResult.Success -> {
@@ -1826,7 +1832,11 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                                         null
                                     },
                                     message = getApplication<Application>().getString(
-                                        R.string.unity_font_raw_patch_done,
+                                        if (mergeWithExisting) {
+                                            R.string.unity_font_raw_merge_done
+                                        } else {
+                                            R.string.unity_font_raw_patch_done
+                                        },
                                         outcome.patchedRawFonts,
                                     ),
                                 ),

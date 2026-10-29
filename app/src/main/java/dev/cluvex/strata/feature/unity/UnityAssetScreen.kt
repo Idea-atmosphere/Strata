@@ -117,6 +117,8 @@ fun UnityAssetScreen(
     var storeUncompressed by remember(path) { mutableStateOf(false) }
     var singleBlock by remember(path) { mutableStateOf(false) }
     var pendingRawFontTarget by remember(path) { mutableStateOf<Long?>(null) }
+    var pendingRawFontMerge by remember(path) { mutableStateOf(false) }
+    var rawFontModePrompt by remember(path) { mutableStateOf<Long?>(null) }
     var addLanguagePrompt by remember(path) { mutableStateOf(false) }
     var showDiscovery by rememberSaveable(path) { mutableStateOf(false) }
     var discoveryStaging by remember(path) { mutableStateOf(false) }
@@ -251,9 +253,10 @@ fun UnityAssetScreen(
     val rawFontTtfPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
         val entry = selectedEntry
         if (uri != null && entry != null) {
-            vm.applyRawFont(entry, uri, context.contentResolver, pendingRawFontTarget)
+            vm.applyRawFont(entry, uri, context.contentResolver, pendingRawFontTarget, pendingRawFontMerge)
         }
         pendingRawFontTarget = null
+        pendingRawFontMerge = false
     }
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -453,12 +456,7 @@ fun UnityAssetScreen(
                                                 },
                                                 onReplaceRawFont = { pathId ->
                                                     pendingRawFontTarget = pathId
-                                                    val estimate = vm.estimateRewrite()
-                                                    if (estimate != null) {
-                                                        fontRewritePrompt = estimate
-                                                    } else {
-                                                        rawFontTtfPicker.launch(arrayOf("*/*"))
-                                                    }
+                                                    rawFontModePrompt = pathId
                                                 },
                                                 fontReport = state.fontReports[entry.name],
                                                 textTransformOptions = state.textTransformOptions,
@@ -673,11 +671,43 @@ fun UnityAssetScreen(
         )
     }
 
+    rawFontModePrompt?.let {
+        val launchPicker = { merge: Boolean ->
+            rawFontModePrompt = null
+            pendingRawFontMerge = merge
+            val estimate = vm.estimateRewrite()
+            if (estimate != null) {
+                fontRewritePrompt = estimate
+            } else {
+                rawFontTtfPicker.launch(arrayOf("*/*"))
+            }
+        }
+        AlertDialog(
+            onDismissRequest = {
+                rawFontModePrompt = null
+                pendingRawFontTarget = null
+            },
+            title = { Text(stringResource(R.string.unity_font_mode_title)) },
+            text = { Text(stringResource(R.string.unity_font_mode_body)) },
+            confirmButton = {
+                TextButton(onClick = { launchPicker(false) }) {
+                    Text(stringResource(R.string.unity_font_mode_replace))
+                }
+            },
+            dismissButton = {
+                TextButton(onClick = { launchPicker(true) }) {
+                    Text(stringResource(R.string.unity_font_mode_merge))
+                }
+            },
+        )
+    }
+
     fontRewritePrompt?.let { estimate ->
         AlertDialog(
             onDismissRequest = {
                 fontRewritePrompt = null
                 pendingRawFontTarget = null
+                pendingRawFontMerge = false
             },
             title = { Text(stringResource(R.string.unity_font_rewrite_warning_title)) },
             text = {
@@ -703,7 +733,11 @@ fun UnityAssetScreen(
                     Text(
                         stringResource(
                             if (pendingRawFontTarget != null) {
-                                R.string.unity_font_replace_raw
+                                if (pendingRawFontMerge) {
+                                    R.string.unity_font_mode_merge
+                                } else {
+                                    R.string.unity_font_replace_raw
+                                }
                             } else {
                                 R.string.unity_font_enable_dynamic
                             },
@@ -715,6 +749,7 @@ fun UnityAssetScreen(
                 TextButton(onClick = {
                     fontRewritePrompt = null
                     pendingRawFontTarget = null
+                    pendingRawFontMerge = false
                 }) {
                     Text(stringResource(R.string.common_cancel))
                 }

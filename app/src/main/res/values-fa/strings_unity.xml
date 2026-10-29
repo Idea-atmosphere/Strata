@@ -66,6 +66,11 @@
     <string name="unity_font_rewrite_warning_body">اصلاح فونت در %1$s نیازمند بازخوانی و فشرده‌سازی LZ4 حدود %2$s دادهٔ موقت است (زمان تخمینی %3$d تا %4$d ثانیه).</string>
     <string name="unity_font_patch_done">‏%1$d فونت TMP به حالت پویا (Dynamic) تبدیل شد. برای ذخیره، بسته را بازسازی کنید.</string>
     <string name="unity_font_replace_raw">جایگزینی TTF فونت خام…</string>
+    <string name="unity_font_mode_title">جایگزینی یا ترکیبِ فونت؟</string>
+    <string name="unity_font_mode_body">جایگزینی، فونتِ داخلِ فایل را با فایلِ انتخاب‌شده عوض می‌کند. ترکیب، فونتِ موجود را نگه می‌دارد و فقط گلیف‌هایی را که ندارد از فایلِ انتخاب‌شده به آن اضافه می‌کند.</string>
+    <string name="unity_font_mode_replace">جایگزینی فونت</string>
+    <string name="unity_font_mode_merge">ترکیب با فونتِ موجود</string>
+    <string name="unity_font_raw_merge_done">فونتِ انتخاب‌شده با %1$d فونت خام ترکیب شد. برای ذخیره، بسته را بازسازی کنید.</string>
     <string name="unity_font_raw_patch_done">دادهٔ TTF در %1$d فونت خام جایگزین شد. برای ذخیره، بسته را بازسازی کنید.</string>
     <string name="unity_repack_store_uncompressed">ذخیرهٔ بلوک‌های داده بدون فشرده‌سازی</string>
     <string name="unity_repack_single_block">نوشتن یک بلوکِ دادهٔ واحدِ بدون فشرده‌سازی</string>

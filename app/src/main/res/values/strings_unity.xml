@@ -66,6 +66,11 @@
     <string name="unity_font_rewrite_warning_body">Patching fonts in %1$s requires restreaming and LZ4-compressing %2$s of temporary data (estimated %3$d–%4$d s).</string>
     <string name="unity_font_patch_done">Patched %1$d TMP font asset(s) to Dynamic mode. Rebuild the bundle to save.</string>
     <string name="unity_font_replace_raw">Replace raw font TTF…</string>
+    <string name="unity_font_mode_title">Replace or merge the font?</string>
+    <string name="unity_font_mode_body">Replace swaps the embedded font for the picked file. Merge keeps the existing font and adds the glyphs it is missing from the picked file.</string>
+    <string name="unity_font_mode_replace">Replace font</string>
+    <string name="unity_font_mode_merge">Merge with existing font</string>
+    <string name="unity_font_raw_merge_done">Merged the picked font into %1$d raw font(s). Rebuild the bundle to save.</string>
     <string name="unity_font_raw_patch_done">Replaced TTF data in %1$d raw font(s). Rebuild the bundle to save.</string>
     <string name="unity_repack_store_uncompressed">Store data blocks uncompressed</string>
     <string name="unity_repack_single_block">Write a single uncompressed data block</string>

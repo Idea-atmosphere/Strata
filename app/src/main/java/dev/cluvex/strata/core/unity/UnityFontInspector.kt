@@ -559,6 +559,26 @@ internal object UnityFontInspector {
      * must not assume Arabic/Persian, so translators for other scripts — or a
      * re-application of the game's own font — are not blocked here.
      */
+    /**
+     * Merges the picked font into the embedded `m_FontData` of [fontStruct]:
+     * the existing face is kept exactly and only glyphs for codepoints it lacks
+     * are added from the picked file (see [TtfMerger]). The merged face keeps
+     * the original font's name and metrics, so Latin text renders unchanged.
+     */
+    fun mergeRawFontData(fontStruct: UVal.Struct, ttfBytes: ByteArray) {
+        if (fontStruct.fields["m_FontData"] == null) {
+            throw UnityFormatException("Font object is missing m_FontData")
+        }
+        val existing = extractFontDataBytes(fontStruct)
+        if (existing.isEmpty()) {
+            throw UnityFormatException("Font object has empty m_FontData to merge into")
+        }
+        if (!TtfCmapInspector.isValidFontHeader(existing)) {
+            throw UnityFormatException("Embedded font is not a valid TrueType/OpenType (sfnt) font")
+        }
+        replaceRawFontData(fontStruct, TtfMerger.merge(existing, ttfBytes))
+    }
+
     fun replaceRawFontData(fontStruct: UVal.Struct, ttfBytes: ByteArray) {
         if (!TtfCmapInspector.isValidFontHeader(ttfBytes)) {
             throw UnityFormatException("Supplied font file is not a valid TrueType/OpenType (sfnt) font")
