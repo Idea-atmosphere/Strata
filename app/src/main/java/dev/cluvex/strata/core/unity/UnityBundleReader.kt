@@ -1748,13 +1748,25 @@ class UnityBundleDocument internal constructor(
      * Rebuilds the bundle (or standalone serialized file) with [replacements] applied.
      * When [storeUncompressed] is true, UnityFS data blocks are stored raw instead of
      * LZ4HC-compressed, matching bundles Unity itself ships uncompressed; the block
-     * directory keeps its usual encoding. This is a fidelity/diagnostic option for
-     * loaders that reject the compressed form.
+     * directory keeps its usual encoding. When [singleBlock] is true, the whole data
+     * section is written as one uncompressed block, replicating the layout of bundles
+     * Unity ships as a single stored block. Both are fidelity/diagnostic options for
+     * loaders that reject the multi-block compressed form.
      */
-    fun repack(output: File, replacements: Map<String, File> = emptyMap(), storeUncompressed: Boolean = false) =
-        withOpenDocument { repackOpen(output, replacements, storeUncompressed) }
+    fun repack(
+        output: File,
+        replacements: Map<String, File> = emptyMap(),
+        storeUncompressed: Boolean = false,
+        singleBlock: Boolean = false,
+    ) =
+        withOpenDocument { repackOpen(output, replacements, storeUncompressed, singleBlock) }
 
-    private fun repackOpen(output: File, replacements: Map<String, File>, storeUncompressed: Boolean) {
+    private fun repackOpen(
+        output: File,
+        replacements: Map<String, File>,
+        storeUncompressed: Boolean,
+        singleBlock: Boolean,
+    ) {
         if (!repackSupported) throw UnityFormatException("This Unity format is read-only; repacking needs a UnityFS bundle or serialized file")
         if (output.canonicalFile == source.canonicalFile) throw IOException("Output must not replace the source bundle")
         if (output.exists()) throw IOException("Output already exists: ${output.name}")
@@ -1762,7 +1774,7 @@ class UnityBundleDocument internal constructor(
         parent.mkdirs()
         val temporary = temporarySibling(output, "repack")
         try {
-            repackTo(temporary, replacements, storeUncompressed)
+            repackTo(temporary, replacements, storeUncompressed, singleBlock)
             RandomAccessFile(temporary, "rw").use { it.fd.sync() }
             publishTemporary(temporary, output)
         } catch (e: Throwable) {
@@ -1771,7 +1783,12 @@ class UnityBundleDocument internal constructor(
         }
     }
 
-    private fun repackTo(output: File, replacements: Map<String, File>, storeUncompressed: Boolean) {
+    private fun repackTo(
+        output: File,
+        replacements: Map<String, File>,
+        storeUncompressed: Boolean,
+        singleBlock: Boolean,
+    ) {
         val serializedIndex = serialized
         if (serializedIndex != null) {
             serializedIndex.rebuild(output, dataFile, replacements, summary.entries)
@@ -1826,7 +1843,7 @@ class UnityBundleDocument internal constructor(
             val updated = summary.entries.mapIndexed { index, entry ->
                 entry.copy(offset = outputOffsets[index], size = replacements[entry.name]?.length() ?: entry.size)
             }
-            writeNormalizedUnityFs(staged, output, source, summary, updated, outputCursor, unityFsProfile, storeUncompressed)
+            writeNormalizedUnityFs(staged, output, source, summary, updated, outputCursor, unityFsProfile, storeUncompressed, singleBlock)
             UnityBundleReader.verifyUnityFsOutput(output, updated, outputCursor, unityFsProfile)
         } catch (e: Throwable) {
             output.delete()
@@ -1902,6 +1919,7 @@ class UnityBundleDocument internal constructor(
             dataSize: Long,
             profile: UnityFsWriteProfile?,
             storeUncompressed: Boolean = false,
+            singleBlock: Boolean = false,
         ) {
             val blockCountLong = if (dataSize == 0L) 0L else 1L + (dataSize - 1) / OUTPUT_BLOCK_SIZE
             if (blockCountLong > MAX_BLOCKS) throw UnityFormatException("UnityFS has too many data blocks")
@@ -1924,26 +1942,37 @@ class UnityBundleDocument internal constructor(
                             val size = minOf(left, OUTPUT_BLOCK_SIZE.toLong()).toInt()
                             readExactly(input, buffer, size)
                             uncompressedDigest?.update(buffer, 0, size)
-                            val encoded = if (storeUncompressed) {
-                                null
-                            } else {
-                                try {
-                                    Lz4BlockEncoder.encode(buffer, size)
-                                } catch (_: Exception) {
-                                    null
-                                }
-                            }
-                            if (encoded != null && encoded.size < size) {
-                                blockOut.write(encoded)
-                                compressedDigest?.update(encoded)
-                                blocks += OutputBlock(size, encoded.size, preferredCodec)
-                            } else {
+                            if (singleBlock) {
+                                // One stored block for the whole data section: stream it in
+                                // bounded chunks so no block-sized buffer is ever allocated,
+                                // and never run the LZ4 encoder over it.
                                 blockOut.write(buffer, 0, size)
                                 compressedDigest?.update(buffer, 0, size)
-                                blocks += OutputBlock(size, size, UNCOMPRESSED)
-                                rawFallbackBlocks++
+                            } else {
+                                val encoded = if (storeUncompressed) {
+                                    null
+                                } else {
+                                    try {
+                                        Lz4BlockEncoder.encode(buffer, size)
+                                    } catch (_: Exception) {
+                                        null
+                                    }
+                                }
+                                if (encoded != null && encoded.size < size) {
+                                    blockOut.write(encoded)
+                                    compressedDigest?.update(encoded)
+                                    blocks += OutputBlock(size, encoded.size, preferredCodec)
+                                } else {
+                                    blockOut.write(buffer, 0, size)
+                                    compressedDigest?.update(buffer, 0, size)
+                                    blocks += OutputBlock(size, size, UNCOMPRESSED)
+                                    rawFallbackBlocks++
+                                }
                             }
                             left -= size
+                        }
+                        if (singleBlock && dataSize > 0) {
+                            blocks += OutputBlock(dataSize.toInt(), dataSize.toInt(), UNCOMPRESSED)
                         }
                         if (input.read() >= 0) throw IOException("UnityFS staging data grew while it was being compressed")
                     }

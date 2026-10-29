@@ -115,6 +115,7 @@ fun UnityAssetScreen(
     var signPrompt by remember(path) { mutableStateOf(false) }
     var fontRewritePrompt by remember(path) { mutableStateOf<UnityBundleRewriteEstimate?>(null) }
     var storeUncompressed by remember(path) { mutableStateOf(false) }
+    var singleBlock by remember(path) { mutableStateOf(false) }
     var pendingRawFontTarget by remember(path) { mutableStateOf<Long?>(null) }
     var addLanguagePrompt by remember(path) { mutableStateOf(false) }
     var showDiscovery by rememberSaveable(path) { mutableStateOf(false) }
@@ -502,7 +503,7 @@ fun UnityAssetScreen(
                                                         }
                                                     }
                                                 },
-                                                onExportPackage = { vm.repack(parents, storeUncompressed) },
+                                                onExportPackage = { vm.repack(parents, storeUncompressed, singleBlock) },
                                                 onExportAll = { vm.exportLocalization() },
                                                 onExportLanguage = vm::exportLocalization,
                                                 onAddLanguage = {
@@ -549,8 +550,18 @@ fun UnityAssetScreen(
                             style = MaterialTheme.typography.bodyMedium,
                         )
                     }
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        modifier = Modifier.fillMaxWidth().clickable { singleBlock = !singleBlock },
+                    ) {
+                        Checkbox(checked = singleBlock, onCheckedChange = { singleBlock = it })
+                        Text(
+                            stringResource(R.string.unity_repack_single_block),
+                            style = MaterialTheme.typography.bodyMedium,
+                        )
+                    }
                     Button(
-                        onClick = { vm.repack(parents, storeUncompressed) },
+                        onClick = { vm.repack(parents, storeUncompressed, singleBlock) },
                         enabled = !busy,
                         modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
                     ) {

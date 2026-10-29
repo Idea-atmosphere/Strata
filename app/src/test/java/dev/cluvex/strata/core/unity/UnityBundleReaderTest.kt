@@ -308,6 +308,24 @@ class UnityBundleReaderTest {
     }
 
     @Test
+    fun repackWritesSingleUncompressedBlockWhenRequested() {
+        val contents = ByteArray(300_000) { (it % 13).toByte() }
+        val source = writeBundle(temp.root, "single-block-source.bundle", contents, compression = 0)
+        val output = File(temp.root, "single-block-output.bundle")
+        UnityBundleReader.open(source, File(temp.root, "cache-single")).use { it.repack(output, singleBlock = true) }
+        val table = readBundleTable(output)
+        assertThat(table.blocks).hasSize(1)
+        assertThat(table.blocks.single().codec).isEqualTo(0)
+        assertThat(table.blocks.single().uncompressed).isEqualTo(contents.size)
+        assertThat(table.blocks.single().compressed).isEqualTo(contents.size)
+        UnityBundleReader.open(output, File(temp.root, "cache-single-output")).use { document ->
+            val extracted = File(temp.root, "single-block-extracted.bin")
+            document.copyEntry(document.summary.entries.single(), extracted)
+            assertThat(extracted.readBytes()).isEqualTo(contents)
+        }
+    }
+
+    @Test
     fun repackCarriesSourceHashConvention() {
         val contents = ByteArray(180_000) { (it % 79).toByte() }
         val replacementBytes = ByteArray(190_000) { (it % 83).toByte() }
