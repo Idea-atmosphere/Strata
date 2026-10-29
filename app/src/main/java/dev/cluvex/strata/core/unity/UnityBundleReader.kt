@@ -2023,7 +2023,10 @@ class UnityBundleDocument internal constructor(
                             left -= size
                         }
                         if (singleBlock && dataSize > 0) {
-                            blocks += OutputBlock(dataSize.toInt(), dataSize.toInt(), UNCOMPRESSED)
+                            // Unity writes the archive-level 0x40 flag into the
+                            // single block's entry too; the original single-block
+                            // archives carry it, so preserve it here.
+                            blocks += OutputBlock(dataSize.toInt(), dataSize.toInt(), UNCOMPRESSED or BLOCK_FLAG_COMBINED)
                         }
                         if (input.read() >= 0) throw IOException("UnityFS staging data grew while it was being compressed")
                     }
@@ -2152,6 +2155,7 @@ class UnityBundleDocument internal constructor(
         private const val LZ4 = 2
         private const val LZ4HC = 3
         private const val BLOCKS_AND_DIRECTORY_COMBINED = 0x40L
+        private const val BLOCK_FLAG_COMBINED = 0x40
         private const val BLOCK_INFO_NEEDS_PADDING = 0x200L
         private const val PRESERVED_LAYOUT_FLAGS = 0x300L
         private const val MAX_BLOCKS = 100_000

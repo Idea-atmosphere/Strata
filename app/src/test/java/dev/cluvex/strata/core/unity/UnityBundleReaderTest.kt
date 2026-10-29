@@ -17,7 +17,7 @@ import java.util.concurrent.atomic.AtomicReference
 
 class UnityBundleReaderTest {
     private data class TestNode(val name: String, val offset: Long, val size: Long)
-    private data class TestBlock(val uncompressed: Int, val compressed: Int, val codec: Int)
+    private data class TestBlock(val uncompressed: Int, val compressed: Int, val codec: Int, val rawFlags: Int = 0)
     private data class TestBundleTable(
         val declaredSize: Long,
         val hash: ByteArray,
@@ -316,6 +316,7 @@ class UnityBundleReaderTest {
         val table = readBundleTable(output)
         assertThat(table.blocks).hasSize(1)
         assertThat(table.blocks.single().codec).isEqualTo(0)
+        assertThat(table.blocks.single().rawFlags).isEqualTo(0x40)
         assertThat(table.blocks.single().uncompressed).isEqualTo(contents.size)
         assertThat(table.blocks.single().compressed).isEqualTo(contents.size)
         UnityBundleReader.open(output, File(temp.root, "cache-single-output")).use { document ->
@@ -816,7 +817,10 @@ class UnityBundleReaderTest {
                 val hash = ByteArray(16).also(table::readFully)
                 val count = table.readInt()
                 val blocks = List(count) {
-                    TestBlock(table.readInt(), table.readInt(), table.readUnsignedShort() and 0x3F)
+                    val uncompressed = table.readInt()
+                    val compressed = table.readInt()
+                    val rawFlags = table.readUnsignedShort()
+                    TestBlock(uncompressed, compressed, rawFlags and 0x3F, rawFlags)
                 }
                 return TestBundleTable(declaredSize, hash, flags and 0x3F, flags and 0x80 != 0, blocks)
             }
