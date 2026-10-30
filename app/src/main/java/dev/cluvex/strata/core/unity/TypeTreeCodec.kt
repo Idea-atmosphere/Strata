@@ -146,14 +146,23 @@ internal object TypeTreeCodec {
                 val array = node.children[0]
                 if (array.aligns) align = true
                 val size = reader.readI32()
-                if (size < 0 || size > MAX_ELEMENTS) throw UnityFormatException("Type tree array is too large")
                 val subtype = array.children.getOrElse(1) { throw UnityFormatException("Type tree array is malformed") }
-                value = if (subtype.aligns) {
-                    readValueArray(subtype, size, reader)
+                // Byte vectors (notably Font.m_FontData) can legitimately exceed the
+                // element-count guard: a 22 MB font is 22M one-byte elements. Read
+                // one-byte elements in bulk as bytes instead of one UVal per byte,
+                // bounded by the byte-array limit rather than the element limit.
+                value = if (PRIMITIVE_WIDTHS[subtype.type] == 1 && !subtype.aligns) {
+                    if (size < 0 || size > MAX_DATA_BYTES) throw UnityFormatException("Type tree byte array is too large")
+                    UVal.Bytes(reader.readBytes(size))
                 } else {
-                    val items = ArrayList<UVal>(size)
-                    repeat(size) { items += readValue(subtype, reader) }
-                    UVal.Arr(items)
+                    if (size < 0 || size > MAX_ELEMENTS) throw UnityFormatException("Type tree array is too large")
+                    if (subtype.aligns) {
+                        readValueArray(subtype, size, reader)
+                    } else {
+                        val items = ArrayList<UVal>(size)
+                        repeat(size) { items += readValue(subtype, reader) }
+                        UVal.Arr(items)
+                    }
                 }
             }
             else -> {
@@ -193,13 +202,18 @@ internal object TypeTreeCodec {
                 val subtype = array.children.getOrElse(1) { throw UnityFormatException("Type tree array is malformed") }
                 repeat(size) {
                     val inner = reader.readI32()
-                    if (inner < 0 || inner > MAX_ELEMENTS) throw UnityFormatException("Type tree array is too large")
-                    items += if (subtype.aligns) {
-                        readValueArray(subtype, inner, reader)
+                    if (PRIMITIVE_WIDTHS[subtype.type] == 1 && !subtype.aligns) {
+                        if (inner < 0 || inner > MAX_DATA_BYTES) throw UnityFormatException("Type tree byte array is too large")
+                        items += UVal.Bytes(reader.readBytes(inner))
                     } else {
-                        val innerItems = ArrayList<UVal>(inner)
-                        repeat(inner) { innerItems += readValue(subtype, reader) }
-                        UVal.Arr(innerItems)
+                        if (inner < 0 || inner > MAX_ELEMENTS) throw UnityFormatException("Type tree array is too large")
+                        items += if (subtype.aligns) {
+                            readValueArray(subtype, inner, reader)
+                        } else {
+                            val innerItems = ArrayList<UVal>(inner)
+                            repeat(inner) { innerItems += readValue(subtype, reader) }
+                            UVal.Arr(innerItems)
+                        }
                     }
                 }
             }
@@ -273,13 +287,22 @@ internal object TypeTreeCodec {
             node.children.isNotEmpty() && node.children[0].type == "Array" -> {
                 val array = node.children[0]
                 if (array.aligns) align = true
-                val items = (value as UVal.Arr).items
-                writer.writeRaw(items.size.toLong(), 4)
                 val subtype = array.children.getOrElse(1) { throw UnityFormatException("Type tree array is malformed") }
-                if (subtype.aligns) {
-                    writeValueArray(subtype, items, writer)
-                } else {
-                    items.forEach { writeValue(subtype, it, writer) }
+                when (value) {
+                    is UVal.Bytes -> {
+                        writer.writeRaw(value.data.size.toLong(), 4)
+                        writer.out.write(value.data)
+                    }
+                    is UVal.Arr -> {
+                        val items = value.items
+                        writer.writeRaw(items.size.toLong(), 4)
+                        if (subtype.aligns) {
+                            writeValueArray(subtype, items, writer)
+                        } else {
+                            items.forEach { writeValue(subtype, it, writer) }
+                        }
+                    }
+                    else -> throw UnityFormatException("Type tree array value has unexpected type ${value::class.simpleName}")
                 }
             }
             else -> {
@@ -320,12 +343,21 @@ internal object TypeTreeCodec {
                 if (array.aligns) align = true
                 val subtype = array.children.getOrElse(1) { throw UnityFormatException("Type tree array is malformed") }
                 items.forEach { item ->
-                    val inner = (item as UVal.Arr).items
-                    writer.writeRaw(inner.size.toLong(), 4)
-                    if (subtype.aligns) {
-                        writeValueArray(subtype, inner, writer)
-                    } else {
-                        inner.forEach { writeValue(subtype, it, writer) }
+                    when (item) {
+                        is UVal.Bytes -> {
+                            writer.writeRaw(item.data.size.toLong(), 4)
+                            writer.out.write(item.data)
+                        }
+                        is UVal.Arr -> {
+                            val inner = item.items
+                            writer.writeRaw(inner.size.toLong(), 4)
+                            if (subtype.aligns) {
+                                writeValueArray(subtype, inner, writer)
+                            } else {
+                                inner.forEach { writeValue(subtype, it, writer) }
+                            }
+                        }
+                        else -> throw UnityFormatException("Type tree array item has unexpected type ${item::class.simpleName}")
                     }
                 }
             }
