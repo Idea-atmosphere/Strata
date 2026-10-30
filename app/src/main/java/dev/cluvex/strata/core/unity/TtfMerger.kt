@@ -890,9 +890,14 @@ internal object TtfMerger {
 
     private fun buildCmap(mergedCmap: Map<Int, Int>, glyphCount: Int): ByteArray {
         val sorted = mergedCmap.entries.sortedBy { it.key }
-        val useFormat4 = sorted.all { it.key <= 0xFFFF } && glyphCount <= 0xFFFF
-        val format4 = if (useFormat4) {
-            buildCmapFormat4(sorted).takeIf { it.size <= 0xFFFF }
+        // Always emit a BMP (format 4) subtable alongside format 12 when glyph
+        // IDs fit in 16 bits: the original fonts ship one, and some loaders
+        // only consult the BMP subtable. Format 12 still carries the full
+        // repertoire (including non-BMP codepoints, which format 4 cannot
+        // represent), so fonts with non-BMP coverage keep working everywhere.
+        val bmp = sorted.filter { it.key <= 0xFFFF }
+        val format4 = if (glyphCount <= 0xFFFF && bmp.isNotEmpty()) {
+            buildCmapFormat4(bmp).takeIf { it.size <= 0xFFFF }
         } else {
             null
         }

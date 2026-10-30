@@ -51,6 +51,31 @@ class TtfMergerTest {
     }
 
     @Test
+    fun mergeKeepsBmpFormat4AlongsideFormat12WhenNonBmpPresent() {
+        val base = buildFont(
+            upm = 2048,
+            glyphs = listOf(TestGlyph.Empty, TestGlyph.Rect(0, 0, 100, 200), TestGlyph.Rect(0, 0, 50, 60)),
+            cmap = mapOf(0x41 to 1, 0x1F600 to 2),
+        )
+        val added = buildFont(
+            upm = 2048,
+            glyphs = listOf(TestGlyph.Empty, TestGlyph.Rect(10, 20, 30, 40)),
+            cmap = mapOf(0xFB50 to 1),
+        )
+        val merged = TtfMerger.merge(base, added)
+
+        assertThat(readCmapFormats(merged)).containsExactly(4, 12)
+        val cmap12 = readCmap12(merged)
+        assertThat(cmap12[0x41]).isEqualTo(1)
+        assertThat(cmap12[0x1F600]).isEqualTo(2)
+        assertThat(cmap12[0xFB50]).isEqualTo(3)
+        val cmap4 = readCmap4(merged)
+        assertThat(cmap4[0x41]).isEqualTo(1)
+        assertThat(cmap4[0xFB50]).isEqualTo(3)
+        assertThat(cmap4).doesNotContainKey(0x1F600)
+    }
+
+    @Test
     fun mergeScalesAddedGlyphsAndMetricsToBaseUpm() {
         val base = buildFont(
             upm = 2048,
@@ -501,6 +526,52 @@ class TtfMergerTest {
                 }
                 return result
             }
+        }
+        return emptyMap()
+    }
+
+    private fun readCmapFormats(bytes: ByteArray): List<Int> {
+        val cmap = readTable(bytes, "cmap")!!
+        val buffer = ByteBuffer.wrap(cmap).order(ByteOrder.BIG_ENDIAN)
+        val count = buffer.getShort(2).toInt() and 0xFFFF
+        val formats = ArrayList<Int>(count)
+        for (i in 0 until count) {
+            val offset = buffer.getInt(4 + i * 8 + 4)
+            formats += buffer.getShort(offset).toInt() and 0xFFFF
+        }
+        return formats
+    }
+
+    private fun readCmap4(bytes: ByteArray): Map<Int, Int> {
+        val cmap = readTable(bytes, "cmap")!!
+        val buffer = ByteBuffer.wrap(cmap).order(ByteOrder.BIG_ENDIAN)
+        val count = buffer.getShort(2).toInt() and 0xFFFF
+        for (i in 0 until count) {
+            val offset = buffer.getInt(4 + i * 8 + 4)
+            if (buffer.getShort(offset).toInt() and 0xFFFF != 4) continue
+            val segCount = buffer.getShort(offset + 6).toInt() and 0xFFFF shr 1
+            val endBase = offset + 14
+            val startBase = endBase + 2 * segCount + 2
+            val deltaBase = startBase + 2 * segCount
+            val rangeBase = deltaBase + 2 * segCount
+            val result = LinkedHashMap<Int, Int>()
+            for (s in 0 until segCount) {
+                val end = buffer.getShort(endBase + 2 * s).toInt() and 0xFFFF
+                val start = buffer.getShort(startBase + 2 * s).toInt() and 0xFFFF
+                if (start == 0xFFFF && end == 0xFFFF) continue
+                val delta = buffer.getShort(deltaBase + 2 * s).toInt()
+                val rangeOffset = buffer.getShort(rangeBase + 2 * s).toInt() and 0xFFFF
+                for (cp in start..end) {
+                    val glyph = if (rangeOffset == 0) {
+                        (cp + delta) and 0xFFFF
+                    } else {
+                        val address = rangeBase + 2 * s + rangeOffset + 2 * (cp - start)
+                        (buffer.getShort(address).toInt() and 0xFFFF plus delta) and 0xFFFF
+                    }
+                    if (glyph != 0) result[cp] = glyph
+                }
+            }
+            return result
         }
         return emptyMap()
     }
