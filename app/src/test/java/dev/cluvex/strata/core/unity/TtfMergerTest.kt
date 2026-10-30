@@ -549,7 +549,7 @@ class TtfMergerTest {
         for (i in 0 until count) {
             val offset = buffer.getInt(4 + i * 8 + 4)
             if (buffer.getShort(offset).toInt() and 0xFFFF != 4) continue
-            val segCount = buffer.getShort(offset + 6).toInt() and 0xFFFF shr 1
+            val segCount = (buffer.getShort(offset + 6).toInt() and 0xFFFF) shr 1
             val endBase = offset + 14
             val startBase = endBase + 2 * segCount + 2
             val deltaBase = startBase + 2 * segCount
@@ -566,7 +566,7 @@ class TtfMergerTest {
                         (cp + delta) and 0xFFFF
                     } else {
                         val address = rangeBase + 2 * s + rangeOffset + 2 * (cp - start)
-                        (buffer.getShort(address).toInt() and 0xFFFF plus delta) and 0xFFFF
+                        ((buffer.getShort(address).toInt() and 0xFFFF) + delta) and 0xFFFF
                     }
                     if (glyph != 0) result[cp] = glyph
                 }
