@@ -429,21 +429,30 @@ fun UnityAssetScreen(
                 }
                 state.error != null -> ErrorPanel(state.error ?: stringResource(R.string.unity_load_failed))
                 document != null -> {
-                    BundleSummaryCard(document)
-                    if (parents.isNotEmpty()) {
-                        Text(stringResource(R.string.unity_parent_copy_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
-                    } else {
-                        Text(stringResource(R.string.unity_output_copy_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
-                    }
-                    if (document.summary.entries.isEmpty()) {
-                        Box(Modifier.weight(1f).fillMaxWidth(), contentAlignment = Alignment.Center) {
-                            Text(stringResource(R.string.unity_no_entries), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                    // One LazyColumn for the whole page: the entries
+                    // list must NOT be a weight(1f) list with the
+                    // Persian/repack sections after it -- that pushed
+                    // them below the bottom edge with no scroll to
+                    // reach them. Everything below scrolls as items.
+                    LazyColumn(
+                        Modifier.weight(1f).fillMaxWidth(),
+                        verticalArrangement = Arrangement.spacedBy(4.dp),
+                    ) {
+                        item(key = "summary") { BundleSummaryCard(document) }
+                        item(key = "output-note") {
+                            if (parents.isNotEmpty()) {
+                                Text(stringResource(R.string.unity_parent_copy_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
+                            } else {
+                                Text(stringResource(R.string.unity_output_copy_note), style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant, modifier = Modifier.padding(top = 8.dp, bottom = 4.dp))
+                            }
                         }
-                    } else {
-                        LazyColumn(
-                            Modifier.weight(1f).fillMaxWidth(),
-                            verticalArrangement = Arrangement.spacedBy(4.dp),
-                        ) {
+                        if (document.summary.entries.isEmpty()) {
+                            item(key = "no-entries") {
+                                Box(Modifier.fillMaxWidth(), contentAlignment = Alignment.Center) {
+                                    Text(stringResource(R.string.unity_no_entries), color = MaterialTheme.colorScheme.onSurfaceVariant)
+                                }
+                            }
+                        } else {
                             if (state.textAutoInspectionRunning) {
                                 item(key = "text-auto-inspection-progress") {
                                     Column(
@@ -593,112 +602,115 @@ fun UnityAssetScreen(
                                 }
                             }
                         }
-                    }
-
-                    val selectedPersianTable = state.localizationSources.values.flatten()
-                        .firstOrNull { it.origin.tableId == state.selectedLocalizationTableId }
-                    val persianEntry = document.summary.entries
-                        .firstOrNull { it.name == selectedPersianTable?.origin?.entryName }
-                    PersianModeActions(
-                        busy = busy,
-                        persianMode = state.persianMode,
-                        persianTerms = state.persianTerms,
-                        persianReady = state.persianReady,
-                        persianIssues = state.persianIssues,
-                        persianStatsText = state.persianStatsText,
-                        persianBaseFallbackUri = state.persianBaseFallbackUri,
-                        persianSceneBundleUri = state.persianSceneBundleUri,
-                        persianFontUri = state.persianFontUri,
-                        persianApplied = state.persianApplied,
-                        persianPatchedBaseFile = state.persianPatchedBaseFile,
-                        persianPatchedBaseCrc = state.persianPatchedBaseCrc,
-                        persianEntry = persianEntry,
-                        onTogglePersianMode = vm::setPersianMode,
-                        onLoadTerms = vm::loadPersianTermsFromImportPlan,
-                        onCheckReadiness = vm::checkPersianReadiness,
-                        onSetPersianTerm = vm::setPersianTerm,
-                        onPickBaseFallback = { persianBasePicker.launch(arrayOf("*/*")) },
-                        onPickSceneBundle = { persianScenePicker.launch(arrayOf("*/*")) },
-                        onPickFont = { persianFontPicker.launch(arrayOf("*/*")) },
-                        onApplyPersian = { entry -> vm.applyPersianPlan(entry, context.contentResolver) },
-                        onClearPersianApply = vm::clearPersianApply,
-                        onExportPersianBase = { persianBaseExportPicker.launch("persian-fallback.bin") },
-                    )
-
-                    // Phase 5: static-prefab repoint. Shown after the
-                    // Persian section, not inside it: it does not need
-                    // persianMode or an open document (the prefab file
-                    // is standalone), and it is the step that makes
-                    // statically-fonted menus render Persian at all.
-                    PersianPrefabRepointActions(
-                        busy = busy,
-                        prefabUri = state.persianPrefabUri,
-                        sourceGuid = state.persianPrefabSourceGuid,
-                        targetGuid = state.persianPrefabTargetGuid,
-                        pptrFromFile = state.persianPrefabPptrFromFile,
-                        pptrFromPath = state.persianPrefabPptrFromPath,
-                        pptrToFile = state.persianPrefabPptrToFile,
-                        pptrToPath = state.persianPrefabPptrToPath,
-                        patchedFile = state.persianPrefabPatchedFile,
-                        patchedCrc = state.persianPrefabPatchedCrc,
-                        report = state.persianPrefabReport,
-                        onPickPrefab = { persianPrefabPicker.launch(arrayOf("*/*")) },
-                        onSourceGuidChange = vm::setPersianPrefabSourceGuid,
-                        onTargetGuidChange = vm::setPersianPrefabTargetGuid,
-                        onPptrFromFileChange = vm::setPersianPrefabPptrFromFile,
-                        onPptrFromPathChange = vm::setPersianPrefabPptrFromPath,
-                        onPptrToFileChange = vm::setPersianPrefabPptrToFile,
-                        onPptrToPathChange = vm::setPersianPrefabPptrToPath,
-                        onRepoint = { vm.repointPersianPrefab(context.contentResolver) },
-                        onClear = vm::clearPersianPrefab,
-                        onExport = { persianPrefabExportPicker.launch("persian-prefab.bin") },
-                    )
-
-                    val changedCount = state.replacements.size + state.editedFiles.keys.count { it !in state.replacements }
-                    if (changedCount > 0) {
-                        Text(
-                            stringResource(R.string.unity_replacements_count, changedCount),
-                            style = MaterialTheme.typography.labelMedium,
-                            color = MaterialTheme.colorScheme.primary,
-                            modifier = Modifier.padding(vertical = 4.dp),
-                        )
-                    }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp).clickable { storeUncompressed = !storeUncompressed },
-                    ) {
-                        Checkbox(checked = storeUncompressed, onCheckedChange = { storeUncompressed = it })
-                        Text(
-                            stringResource(R.string.unity_repack_store_uncompressed),
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                    Row(
-                        verticalAlignment = Alignment.CenterVertically,
-                        modifier = Modifier.fillMaxWidth().clickable { singleBlock = !singleBlock },
-                    ) {
-                        Checkbox(checked = singleBlock, onCheckedChange = { singleBlock = it })
-                        Text(
-                            stringResource(R.string.unity_repack_single_block),
-                            style = MaterialTheme.typography.bodyMedium,
-                        )
-                    }
-                    Button(
-                        onClick = { vm.repack(parents, storeUncompressed, singleBlock) },
-                        enabled = !busy,
-                        modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
-                    ) {
-                        if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                        else Text(stringResource(R.string.unity_repack))
-                    }
-                    state.output?.let { saved ->
-                        Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
-                            OutlinedButton(onClick = { onLocate(saved.parent ?: "/", saved.path) }, modifier = Modifier.weight(1f)) {
-                                Text(stringResource(R.string.archive_show_in_files), maxLines = 1)
+                        item(key = "persian") {
+                            val selectedPersianTable = state.localizationSources.values.flatten()
+                                .firstOrNull { it.origin.tableId == state.selectedLocalizationTableId }
+                            val persianEntry = document.summary.entries
+                                .firstOrNull { it.name == selectedPersianTable?.origin?.entryName }
+                            PersianModeActions(
+                                busy = busy,
+                                persianMode = state.persianMode,
+                                persianTerms = state.persianTerms,
+                                persianReady = state.persianReady,
+                                persianIssues = state.persianIssues,
+                                persianStatsText = state.persianStatsText,
+                                persianBaseFallbackUri = state.persianBaseFallbackUri,
+                                persianSceneBundleUri = state.persianSceneBundleUri,
+                                persianFontUri = state.persianFontUri,
+                                persianApplied = state.persianApplied,
+                                persianPatchedBaseFile = state.persianPatchedBaseFile,
+                                persianPatchedBaseCrc = state.persianPatchedBaseCrc,
+                                persianEntry = persianEntry,
+                                onTogglePersianMode = vm::setPersianMode,
+                                onLoadTerms = vm::loadPersianTermsFromImportPlan,
+                                onCheckReadiness = vm::checkPersianReadiness,
+                                onSetPersianTerm = vm::setPersianTerm,
+                                onPickBaseFallback = { persianBasePicker.launch(arrayOf("*/*")) },
+                                onPickSceneBundle = { persianScenePicker.launch(arrayOf("*/*")) },
+                                onPickFont = { persianFontPicker.launch(arrayOf("*/*")) },
+                                onApplyPersian = { entry -> vm.applyPersianPlan(entry, context.contentResolver) },
+                                onClearPersianApply = vm::clearPersianApply,
+                                onExportPersianBase = { persianBaseExportPicker.launch("persian-fallback.bin") },
+                            )
+                        }
+                        item(key = "persian-prefab") {
+                            // Phase 5: static-prefab repoint. Shown after the
+                            // Persian section, not inside it: it does not need
+                            // persianMode or an open document (the prefab file
+                            // is standalone), and it is the step that makes
+                            // statically-fonted menus render Persian at all.
+                            PersianPrefabRepointActions(
+                                busy = busy,
+                                prefabUri = state.persianPrefabUri,
+                                sourceGuid = state.persianPrefabSourceGuid,
+                                targetGuid = state.persianPrefabTargetGuid,
+                                pptrFromFile = state.persianPrefabPptrFromFile,
+                                pptrFromPath = state.persianPrefabPptrFromPath,
+                                pptrToFile = state.persianPrefabPptrToFile,
+                                pptrToPath = state.persianPrefabPptrToPath,
+                                patchedFile = state.persianPrefabPatchedFile,
+                                patchedCrc = state.persianPrefabPatchedCrc,
+                                report = state.persianPrefabReport,
+                                onPickPrefab = { persianPrefabPicker.launch(arrayOf("*/*")) },
+                                onSourceGuidChange = vm::setPersianPrefabSourceGuid,
+                                onTargetGuidChange = vm::setPersianPrefabTargetGuid,
+                                onPptrFromFileChange = vm::setPersianPrefabPptrFromFile,
+                                onPptrFromPathChange = vm::setPersianPrefabPptrFromPath,
+                                onPptrToFileChange = vm::setPersianPrefabPptrToFile,
+                                onPptrToPathChange = vm::setPersianPrefabPptrToPath,
+                                onRepoint = { vm.repointPersianPrefab(context.contentResolver) },
+                                onClear = vm::clearPersianPrefab,
+                                onExport = { persianPrefabExportPicker.launch("persian-prefab.bin") },
+                            )
+                        }
+                        item(key = "repack") {
+                            val changedCount = state.replacements.size + state.editedFiles.keys.count { it !in state.replacements }
+                            if (changedCount > 0) {
+                                Text(
+                                    stringResource(R.string.unity_replacements_count, changedCount),
+                                    style = MaterialTheme.typography.labelMedium,
+                                    color = MaterialTheme.colorScheme.primary,
+                                    modifier = Modifier.padding(vertical = 4.dp),
+                                )
                             }
-                            if (saved.extension.equals("apk", ignoreCase = true)) {
-                                OutlinedButton(onClick = { signPrompt = true }, modifier = Modifier.weight(1f)) {
-                                    Text(stringResource(R.string.unity_sign_copy), maxLines = 1)
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp).clickable { storeUncompressed = !storeUncompressed },
+                            ) {
+                                Checkbox(checked = storeUncompressed, onCheckedChange = { storeUncompressed = it })
+                                Text(
+                                    stringResource(R.string.unity_repack_store_uncompressed),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            }
+                            Row(
+                                verticalAlignment = Alignment.CenterVertically,
+                                modifier = Modifier.fillMaxWidth().clickable { singleBlock = !singleBlock },
+                            ) {
+                                Checkbox(checked = singleBlock, onCheckedChange = { singleBlock = it })
+                                Text(
+                                    stringResource(R.string.unity_repack_single_block),
+                                    style = MaterialTheme.typography.bodyMedium,
+                                )
+                            }
+                            Button(
+                                onClick = { vm.repack(parents, storeUncompressed, singleBlock) },
+                                enabled = !busy,
+                                modifier = Modifier.fillMaxWidth().padding(top = 4.dp),
+                            ) {
+                                if (busy) CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                                else Text(stringResource(R.string.unity_repack))
+                            }
+                            state.output?.let { saved ->
+                                Row(Modifier.fillMaxWidth().padding(top = 6.dp), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                                    OutlinedButton(onClick = { onLocate(saved.parent ?: "/", saved.path) }, modifier = Modifier.weight(1f)) {
+                                        Text(stringResource(R.string.archive_show_in_files), maxLines = 1)
+                                    }
+                                    if (saved.extension.equals("apk", ignoreCase = true)) {
+                                        OutlinedButton(onClick = { signPrompt = true }, modifier = Modifier.weight(1f)) {
+                                            Text(stringResource(R.string.unity_sign_copy), maxLines = 1)
+                                        }
+                                    }
                                 }
                             }
                         }
