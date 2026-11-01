@@ -122,7 +122,18 @@ class UnityPersianPrefabRepointTest {
         pptrBytes(3, 3L).copyInto(obj, 8)
         pptrBytes(4, 1L).copyInto(obj, 20)
         val candidates = UnityPersianPrefabRepoint.scanPptrs(obj)
-        assertThat(candidates.map { it.fileId to it.pathId })
-            .containsExactly(3 to 3L, 4 to 1L)
+        // A candidate scan reports EVERY plausible 4-byte-aligned
+        // window, including windows that merely overlap a real
+        // PPtr or its zero padding (on this data the real PPtrs at
+        // 8 and 20 also yield windows at 0, 4, 12 and 16, which read
+        // path bytes as a new fileID/pathID). That is expected for
+        // a discovery aid, not a parser: callers confirm candidates
+        // against known references (as repointPptr and the
+        // ViewModel's exactly-one rule do). So the assertion is
+        // containment at the exact offsets, not equality, and a
+        // zero-filled object must yield no candidates at all.
+        assertThat(candidates.map { it.offset to (it.fileId to it.pathId) })
+            .containsAtLeast(8 to (3 to 3L), 20 to (4 to 1L))
+        assertThat(UnityPersianPrefabRepoint.scanPptrs(ByteArray(64))).isEmpty()
     }
 }

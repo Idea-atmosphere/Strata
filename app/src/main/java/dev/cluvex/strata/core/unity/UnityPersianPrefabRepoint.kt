@@ -253,7 +253,11 @@ public object UnityPersianPrefabRepoint {
      * a known font/material reference (for example the game's
      * static font asset fileID/pathID) before repointing it.
      * Never repoint every candidate: that would corrupt fields
-     * that merely resemble PPtrs.
+     * that merely resemble PPtrs. Windows are checked at every
+     * 4-byte-aligned offset, so a real PPtr also yields
+     * neighbouring windows that read its own path bytes (or
+     * neighbouring zero padding) as a new fileID/pathID; those
+     * extra candidates are expected, not a bug in the scan.
      */
     public fun scanPptrs(objectBytes: ByteArray): List<PptrCandidate> {
         val found = ArrayList<PptrCandidate>()
