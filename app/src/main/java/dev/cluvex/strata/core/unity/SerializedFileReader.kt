@@ -115,7 +115,18 @@ internal object SerializedFileReader {
                     table.readBytes(16) // old type hash
                 }
                 val tree = if (enableTypeTree) readTypeTree(table, version) else null
-                if (version >= 21) {
+                if (version >= 21 && enableTypeTree) {
+                    // Type dependencies follow the type tree, so they are
+                    // only present when a tree was actually stored. Base
+                    // (stripped) files have enableTypeTree=false: after
+                    // the old type hash comes the NEXT type's classId
+                    // directly (proven on Bendy's base fallback file,
+                    // where reading deps unconditionally misread the
+                    // next classId 28 as a 28-entry dependency list and
+                    // ran past the metadata). Reading deps here when
+                    // enableTypeTree=false therefore breaks every
+                    // stripped Unity 2021+ file, while bundles (which
+                    // store trees) are unaffected.
                     val deps = table.readI32()
                     if (deps !in 0..MAX_TYPES) throw UnityFormatException("Serialized type dependencies are invalid")
                     table.readBytes(deps * 4)
