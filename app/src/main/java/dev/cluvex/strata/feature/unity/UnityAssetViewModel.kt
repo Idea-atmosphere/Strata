@@ -2,6 +2,7 @@ package dev.cluvex.strata.feature.unity
 
 import android.app.Application
 import android.content.ContentResolver
+import android.graphics.Typeface
 import android.net.Uri
 import android.text.TextUtils
 import android.view.View
@@ -45,8 +46,12 @@ import dev.cluvex.strata.core.unity.UnityLocalizationScanReport
 import dev.cluvex.strata.core.unity.UnityLocalizationScanRequest
 import dev.cluvex.strata.core.unity.UnityLocalizationOperations
 import dev.cluvex.strata.core.unity.UnityLocalizationTsv
+import dev.cluvex.strata.core.unity.UVal
+import dev.cluvex.strata.core.unity.UnityBaseData
 import dev.cluvex.strata.core.unity.UnityPersianApplyPipeline
+import dev.cluvex.strata.core.unity.UnityPersianFontRasterizer
 import dev.cluvex.strata.core.unity.UnityPersianFrequency
+import dev.cluvex.strata.core.unity.UnityPersianPlaceholders
 import dev.cluvex.strata.core.unity.UnityPersianWordMapper
 import dev.cluvex.strata.core.unity.UnityProbe
 import dev.cluvex.strata.core.unity.UnityRtlFlagInference
@@ -78,6 +83,7 @@ import kotlinx.coroutines.sync.withLock
 import java.io.File
 import java.io.FileOutputStream
 import java.io.IOException
+import java.util.zip.CRC32
 import java.security.DigestInputStream
 import java.security.MessageDigest
 import java.util.Locale
@@ -172,6 +178,28 @@ data class UnityAssetUiState(
     val persianReady: Boolean = false,
     val persianIssues: List<String> = emptyList(),
     val persianStatsText: String? = null,
+    // Phase 4 part 4: files picked for full Persian Apply, plus its
+    // outputs. Uris are stored here (not just in Screen remember)
+    // so they survive rotation (ViewModel survives config change,
+    // Screen remember does not). persianPatchedBaseFile is the
+    // rebuilt base fallback in stageDir (NOT a bundle replacement:
+    // base files are not bundle entries, so repack does not include
+    // it; the user exports it and installs it via MT Manager, with
+    // the size + CRC in the success message, as for Bendy fallbacks).
+    // persianApplied distinguishes full-Apply success from
+    // preliminary readiness (persianReady): the Screen shows the
+    // preliminary note only when ready && !applied.
+    val persianBaseFallbackUri: Uri? = null,
+    val persianSceneBundleUri: Uri? = null,
+    val persianFontUri: Uri? = null,
+    val persianApplied: Boolean = false,
+    val persianPatchedBaseFile: File? = null,
+    // CRC32 of persianPatchedBaseFile (MT Manager format, hex,
+    // uppercase, 8 digits), for the user to verify after export /
+    // install (size alone is not proof, per Bendy file-identity
+    // lesson). Shown persistently in the Persian section, not only
+    // in the transient success message.
+    val persianPatchedBaseCrc: String? = null,
 ) {
     val outputNeedsSigning: Boolean
         get() = outputSigningHandoff == UnityApkSigningHandoffState.SIGNING_REQUIRED
@@ -1289,6 +1317,19 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         val tables = state.localizationSources[entry.name].orEmpty()
         if (tables.none { it.origin.tableId == selected.origin.tableId }) return
         if (state.busy) return
+        // Plain Apply must not overwrite a Persian staged I2 while
+        // the Persian base is still referenced: plain terms
+        // (logical, not PUA) with a Persian base (PUA glyphs, no
+        // logical Arabic) would render as squares. Clear Persian
+        // Apply first (Persian section), which drops the Persian
+        // base reference; plain Apply then overwrites the staged I2
+        // via overlay, as usual.
+        if (state.persianApplied) {
+            _state.update {
+                it.copy(message = getApplication<Application>().getString(R.string.unity_persian_plain_apply_blocked))
+            }
+            return
+        }
         if (!state.canValidateAndStageLocalization) {
             _state.update {
                 it.copy(message = getApplication<Application>().getString(R.string.unity_readiness_complete_checks))
@@ -1609,14 +1650,55 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
     }
 
     fun setPersianTerm(termKey: String, text: String) {
-        // Editing a term invalidates preliminary readiness (terms
-        // changed since the last check); the user re-checks explicitly.
+        // Editing a term invalidates preliminary readiness AND any
+        // full Apply (staged I2 + rebuilt base were built from the
+        // old terms; their word codes would not match new terms).
+        // Staged I2 in replacements is NOT deleted here (plain Apply
+        // can still overwrite it via overlay, and deleting it would
+        // lose the user's staged work); persianApplied/patched are
+        // cleared so the UI cannot export a stale base file.
         _state.update {
             it.copy(
                 persianTerms = it.persianTerms + (termKey to text),
                 persianReady = false,
                 persianIssues = emptyList(),
                 persianStatsText = null,
+                persianApplied = false,
+                persianPatchedBaseFile = null,
+                persianPatchedBaseCrc = null,
+            )
+        }
+    }
+
+    fun setPersianBaseFallbackUri(uri: Uri?) {
+        _state.update { it.copy(persianBaseFallbackUri = uri) }
+    }
+
+    fun setPersianSceneBundleUri(uri: Uri?) {
+        _state.update { it.copy(persianSceneBundleUri = uri) }
+    }
+
+    fun setPersianFontUri(uri: Uri?) {
+        _state.update { it.copy(persianFontUri = uri) }
+    }
+
+    fun clearPersianApply() {
+        // Clears Apply results only, not terms: the user can re-run
+        // preliminary checks or Apply again with the same terms.
+        // Staged I2 in replacements is left in place (plain Apply
+        // overwrites it via overlay); the rebuilt base file stays
+        // on disk in stageDir until the document closes (stageDir
+        // cleanup), but is no longer referenced, so the UI cannot
+        // export it as if it matched current terms.
+        _state.update {
+            it.copy(
+                persianApplied = false,
+                persianPatchedBaseFile = null,
+                persianPatchedBaseCrc = null,
+                persianReady = false,
+                persianIssues = emptyList(),
+                persianStatsText = null,
+                message = getApplication<Application>().getString(R.string.unity_persian_apply_cleared),
             )
         }
     }
@@ -1747,6 +1829,527 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                 _state.update { it.copy(busy = false, message = localizationFailureMessage(e)) }
             }
         }
+    }
+
+    // Full one-click Persian Apply (Phase 4 part 4). Takes the
+    // in-app Persian terms (logical Persian, from Load terms or the
+    // editor), validates placeholders, runs the full pipeline
+    // (shape -> map -> rank -> rasterize with the picked TTF ->
+    // bake -> letter fallback -> coverage gate -> TMP/Texture
+    // patch), rebuilds the picked base fallback file, and stages
+    // the PUA I2 terms through the same overlay + round-trip path
+    // as plain Apply (applyLocalizationPlan). Transforms must stay
+    // OFF (persianMode forces them OFF): PUA terms are already
+    // shaped + Bidi-ordered, and re-shaping them would break
+    // visual order. Add/import plans are NOT consumed here (PUA
+    // terms come from persianTerms, not from plans); they stay in
+    // state for a later plain Apply (after Clear, if needed). Preliminary readiness (persianReady) is NOT a
+    // gate here: the pipeline re-checks shaping/mapping itself,
+    // plus font, base and coverage, which preliminary does not.
+    // A fast shaping/mapping check runs BEFORE opening the scene
+    // bundle (which can take minutes for large bundles) so obvious
+    // unmapped-code failures report in seconds, not minutes; the
+    // pipeline remains the final gate, so a fast-check/pipeline
+    // divergence would only cost time, never ship a bad Apply.
+    // Outputs: staged I2 file in replacements (as for plain Apply,
+    // repacked normally) + rebuilt base file in
+    // persianPatchedBaseFile (NOT a bundle replacement: base files
+    // are not bundle entries, so repack does not include it; the
+    // user exports it and installs it via MT Manager, with the
+    // size + CRC in the success message, as for Bendy fallbacks).
+    // Catalog CRC is NOT patched here (v1): coredata-style bundles
+    // (Crc 0) need no catalog change, and nonzero-CRC bundles
+    // (e.g. Bendy defaultlocalgroup) need a manual catalog patch
+    // after repack (crc32(bundle[144:]), as before). The success
+    // message says so conditionally, so the user checks the
+    // original CRC first instead of patching unconditionally.
+    // On any failure before I2 staging, nothing is staged and the
+    // rebuilt base (if any) is deleted, so a partial Apply can
+    // never look like success. Empty terms are included when
+    // their placeholders match (expected empty): they bake no
+    // words and apply as empty (same as old, or an explicit clear).
+    fun applyPersianPlan(entry: UnityBundleEntry, resolver: ContentResolver) {
+        val doc = document ?: return
+        val dir = stageDir ?: return
+        val startingState = _state.value
+        if (startingState.busy) return
+        if (!startingState.persianMode) {
+            _state.update { it.copy(message = getApplication<Application>().getString(R.string.unity_persian_apply_needs_mode)) }
+            return
+        }
+        val selected = selectedLocalizationSource(startingState)
+        if (selected == null) {
+            _state.update { it.copy(message = getApplication<Application>().getString(R.string.unity_persian_no_table)) }
+            return
+        }
+        val targetCode = startingState.localizationTargetLanguageCode
+        val targetIndex = if (targetCode != null) selected.languageIndex(targetCode) else -1
+        if (targetIndex < 0) {
+            _state.update { it.copy(message = getApplication<Application>().getString(R.string.unity_persian_no_target)) }
+            return
+        }
+        val baseUri = startingState.persianBaseFallbackUri
+        val sceneUri = startingState.persianSceneBundleUri
+        val fontUri = startingState.persianFontUri
+        if (baseUri == null || sceneUri == null || fontUri == null) {
+            _state.update { it.copy(message = getApplication<Application>().getString(R.string.unity_persian_apply_no_files)) }
+            return
+        }
+        val persianTerms = startingState.persianTerms
+        if (persianTerms.isEmpty()) {
+            _state.update { it.copy(message = getApplication<Application>().getString(R.string.unity_persian_no_terms)) }
+            return
+        }
+        val tables = startingState.localizationSources[entry.name].orEmpty()
+        if (tables.none { it.origin.tableId == selected.origin.tableId }) {
+            _state.update { it.copy(message = getApplication<Application>().getString(R.string.unity_persian_no_table)) }
+            return
+        }
+        _state.update {
+            it.copy(
+                busy = true,
+                message = null,
+                localizationRoundTripStatus = UnityLocalizationRoundTripStatus.RUNNING,
+                localizationRoundTripDetail = null,
+            )
+        }
+        viewModelScope.launch {
+            var baseTemp: File? = null
+            var sceneTemp: File? = null
+            var fontTemp: File? = null
+            var baseStaged: File? = null
+            var rebuiltStaged: File? = null
+            var tmpOut: File? = null
+            var texOut: File? = null
+            var sceneCacheDir: File? = null
+            var stagedI2: File? = null
+            var rebuiltBase: File? = null
+            try {
+                runInterruptible(Dispatchers.IO) {
+                    // 1. Placeholder validation (fast, pure). Expected
+                    // directives come from the ORIGINAL source-language
+                    // term (as in planImport), not from the target's
+                    // old value: placeholders are game logic.
+                    val sourceCode = startingState.localizationSourceLanguageCode
+                        ?.takeIf { code -> selected.languageIndex(code) >= 0 }
+                        ?: selected.languages.first().code
+                    val sourceIndex = selected.languageIndex(sourceCode).coerceAtLeast(0)
+                    val expectedByKey = selected.terms.associate { term ->
+                        term.key to UnityPersianPlaceholders.directives(term.values[sourceIndex].orEmpty())
+                    }
+                    val termInputs = persianTerms.entries.map { (key, text) ->
+                        UnityPersianPlaceholders.TermInput(key, text)
+                    }
+                    val placeholderResult = UnityPersianPlaceholders.validateTerms(termInputs, expectedByKey)
+                    val placeholderIssues = placeholderResult.issues
+                    val validTerms = placeholderResult.validTerms
+                    if (validTerms.isEmpty()) {
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                persianReady = false,
+                                persianIssues = placeholderIssues,
+                                persianStatsText = null,
+                                persianApplied = false,
+                                persianPatchedBaseFile = null,
+                                persianPatchedBaseCrc = null,
+                                localizationRoundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+                                localizationRoundTripDetail = null,
+                                message = getApplication<Application>().getString(R.string.unity_persian_apply_not_ready, placeholderIssues.size),
+                            )
+                        }
+                        return@runInterruptible
+                    }
+                    // 2. Fast shaping/mapping check (before slow
+                    // scene-bundle opening). Same options as the
+                    // pipeline (all ON, plain transform, which is
+                    // correct for placeholders: shaper breaks joining
+                    // at non-Arabic directives, and whole-term Bidi
+                    // places LTR directive runs correctly).
+                    val shapeOptions = UnityTextTransformOptions(
+                        shapeArabic = true,
+                        reverseBidi = true,
+                        normalizePersian = true,
+                    )
+                    val shaped = validTerms.map { UnityTextShaper.transform(it.persianText, shapeOptions) }
+                    val batch = UnityPersianWordMapper.mapShapedTerms(shaped)
+                    if (batch.unmappedCodepoints.isNotEmpty()) {
+                        val unmappedIssues = batch.unmappedCodepoints.sorted().map { code ->
+                            "Unmapped codepoint U+" + code.toString(16).uppercase().padStart(4, '0') +
+                                " (logical Arabic the shaper did not shape, or extension block exhausted)"
+                        }
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                persianReady = false,
+                                persianIssues = placeholderIssues + unmappedIssues,
+                                persianStatsText = null,
+                                persianApplied = false,
+                                persianPatchedBaseFile = null,
+                                persianPatchedBaseCrc = null,
+                                localizationRoundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+                                localizationRoundTripDetail = null,
+                                message = getApplication<Application>().getString(R.string.unity_persian_apply_not_ready, placeholderIssues.size + unmappedIssues.size),
+                            )
+                        }
+                        return@runInterruptible
+                    }
+                    // 3. Copy picked files to stageDir (streaming,
+                    // not readBytes: scene bundles can be 100+ MB,
+                    // and readBytes would hold the whole file in RAM).
+                    baseTemp = copyUriToStageFile(resolver, baseUri, dir, "persian-base-", ".bin")
+                    sceneTemp = copyUriToStageFile(resolver, sceneUri, dir, "persian-scene-", ".bundle")
+                    fontTemp = copyUriToStageFile(resolver, fontUri, dir, "persian-font-", ".ttf")
+                    baseStaged = File(dir, "persian-base-data-${System.nanoTime()}.bin")
+                    val base = UnityBaseData.openBaseFile(baseTemp!!, baseStaged!!)
+                    sceneCacheDir = File(dir, "persian-scene-cache-${System.nanoTime()}").apply { mkdirs() }
+                    val (tmpTree, texTree) = UnityBundleReader.open(sceneTemp!!, sceneCacheDir!!).use { sceneDoc ->
+                        UnityBaseData.findTmpFontAssetTree(sceneDoc.dataFile) to UnityBaseData.findTextureTree(sceneDoc.dataFile)
+                    }
+                    if (tmpTree == null) {
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                persianReady = false,
+                                persianApplied = false,
+                                persianPatchedBaseFile = null,
+                                persianPatchedBaseCrc = null,
+                                persianStatsText = null,
+                                persianIssues = placeholderIssues + getApplication<Application>().getString(R.string.unity_persian_no_tmp_tree),
+                                localizationRoundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+                                localizationRoundTripDetail = null,
+                                message = getApplication<Application>().getString(R.string.unity_persian_apply_not_ready, placeholderIssues.size + 1),
+                            )
+                        }
+                        return@runInterruptible
+                    }
+                    if (texTree == null) {
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                persianReady = false,
+                                persianApplied = false,
+                                persianPatchedBaseFile = null,
+                                persianPatchedBaseCrc = null,
+                                persianStatsText = null,
+                                persianIssues = placeholderIssues + getApplication<Application>().getString(R.string.unity_persian_no_tex_tree),
+                                localizationRoundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+                                localizationRoundTripDetail = null,
+                                message = getApplication<Application>().getString(R.string.unity_persian_apply_not_ready, placeholderIssues.size + 1),
+                            )
+                        }
+                        return@runInterruptible
+                    }
+                    // 4. Find the single TMP + single atlas Texture in
+                    // the base file. Multiple TMPs / Textures are
+                    // blocked with a clear message (v1 only handles
+                    // single-fallback files, like Bendy 2e498d1c);
+                    // picking the first of several would silently
+                    // patch the wrong font/atlas.
+                    val monoSlots = base.index.slots.filter { it.classId == 114 }
+                    val tmpSlots = ArrayList<dev.cluvex.strata.core.unity.SerializedFileIndex.Slot>()
+                    for (slot in monoSlots) {
+                        val raw = try {
+                            UnityBaseData.readRawObject(base, slot)
+                        } catch (_: Exception) {
+                            continue
+                        }
+                        val decoded = try {
+                            UnityBaseData.decodeWithExternalTree(tmpTree, raw, base.index.bigEndian)
+                        } catch (_: Exception) {
+                            continue
+                        }
+                        if (decoded is UVal.Struct &&
+                            "m_GlyphTable" in decoded.fields &&
+                            "m_CharacterTable" in decoded.fields
+                        ) {
+                            tmpSlots.add(slot)
+                        }
+                    }
+                    if (tmpSlots.isEmpty()) {
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                persianReady = false,
+                                persianApplied = false,
+                                persianPatchedBaseFile = null,
+                                persianPatchedBaseCrc = null,
+                                persianStatsText = null,
+                                persianIssues = placeholderIssues + getApplication<Application>().getString(R.string.unity_persian_no_tmp_slot),
+                                localizationRoundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+                                localizationRoundTripDetail = null,
+                                message = getApplication<Application>().getString(R.string.unity_persian_apply_not_ready, placeholderIssues.size + 1),
+                            )
+                        }
+                        return@runInterruptible
+                    }
+                    if (tmpSlots.size > 1) {
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                persianReady = false,
+                                persianApplied = false,
+                                persianPatchedBaseFile = null,
+                                persianPatchedBaseCrc = null,
+                                persianStatsText = null,
+                                persianIssues = placeholderIssues + getApplication<Application>().getString(R.string.unity_persian_multiple_tmp, tmpSlots.size),
+                                localizationRoundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+                                localizationRoundTripDetail = null,
+                                message = getApplication<Application>().getString(R.string.unity_persian_apply_not_ready, placeholderIssues.size + 1),
+                            )
+                        }
+                        return@runInterruptible
+                    }
+                    val texSlots = base.index.slots.filter { it.classId == 28 }
+                    if (texSlots.isEmpty()) {
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                persianReady = false,
+                                persianApplied = false,
+                                persianPatchedBaseFile = null,
+                                persianPatchedBaseCrc = null,
+                                persianStatsText = null,
+                                persianIssues = placeholderIssues + getApplication<Application>().getString(R.string.unity_persian_no_tex_slot),
+                                localizationRoundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+                                localizationRoundTripDetail = null,
+                                message = getApplication<Application>().getString(R.string.unity_persian_apply_not_ready, placeholderIssues.size + 1),
+                            )
+                        }
+                        return@runInterruptible
+                    }
+                    if (texSlots.size > 1) {
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                persianReady = false,
+                                persianApplied = false,
+                                persianPatchedBaseFile = null,
+                                persianPatchedBaseCrc = null,
+                                persianStatsText = null,
+                                persianIssues = placeholderIssues + getApplication<Application>().getString(R.string.unity_persian_multiple_tex, texSlots.size),
+                                localizationRoundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+                                localizationRoundTripDetail = null,
+                                message = getApplication<Application>().getString(R.string.unity_persian_apply_not_ready, placeholderIssues.size + 1),
+                            )
+                        }
+                        return@runInterruptible
+                    }
+                    val tmpSlot = tmpSlots.first()
+                    val texSlot = texSlots.first()
+                    val tmpVal = UnityBaseData.decodeWithExternalTree(tmpTree, UnityBaseData.readRawObject(base, tmpSlot), base.index.bigEndian)
+                    val texVal = UnityBaseData.decodeWithExternalTree(texTree, UnityBaseData.readRawObject(base, texSlot), base.index.bigEndian)
+                    if (tmpVal !is UVal.Struct || texVal !is UVal.Struct) {
+                        throw UnityFormatException("Base TMP/Texture object is not a Struct (wrong object)")
+                    }
+                    // 5. Full pipeline (font rasterizer uses the
+                    // picked TTF; temp TTF is deleted in finally,
+                    // after the pipeline returns, since the rasterizer
+                    // is only used during the pipeline call).
+                    val typeface = Typeface.createFromFile(fontTemp!!)
+                        ?: throw IOException("Could not load selected Persian font (not a valid TTF/OTF)")
+                    val pipelineTerms = validTerms.map { UnityPersianApplyPipeline.PersianTermInput(it.termKey, it.persianText) }
+                    val pipelineResult = UnityPersianApplyPipeline.preparePersianTerms(
+                        pipelineTerms,
+                        tmpVal,
+                        texVal,
+                        UnityPersianFontRasterizer(typeface),
+                    )
+                    if (pipelineResult !is UnityPersianApplyPipeline.PipelineResult.Ready) {
+                        val issues = placeholderIssues + pipelineResult.issues
+                        _state.update {
+                            it.copy(
+                                busy = false,
+                                persianReady = false,
+                                persianIssues = issues,
+                                persianStatsText = null,
+                                persianApplied = false,
+                                persianPatchedBaseFile = null,
+                                persianPatchedBaseCrc = null,
+                                localizationRoundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+                                localizationRoundTripDetail = null,
+                                message = getApplication<Application>().getString(R.string.unity_persian_apply_not_ready, issues.size),
+                            )
+                        }
+                        return@runInterruptible
+                    }
+                    // 6. Encode patched objects + rebuild base file.
+                    // rebuildBaseFile refuses to overwrite an existing
+                    // output, so all outputs here use fresh nanoTime
+                    // names (see finally: intermediates are deleted,
+                    // outputs are kept).
+                    tmpOut = File(dir, "persian-tmp-${System.nanoTime()}.bin")
+                    texOut = File(dir, "persian-tex-${System.nanoTime()}.bin")
+                    tmpOut!!.writeBytes(UnityBaseData.encodeWithExternalTree(tmpTree, pipelineResult.patchedTmp, base.index.bigEndian))
+                    texOut!!.writeBytes(UnityBaseData.encodeWithExternalTree(texTree, pipelineResult.patchedTexture, base.index.bigEndian))
+                    rebuiltBase = File(dir, "persian-fallback-${System.nanoTime()}.bin")
+                    UnityBaseData.rebuildBaseFile(
+                        base,
+                        rebuiltBase!!,
+                        mapOf(tmpSlot.entryName to tmpOut!!, texSlot.entryName to texOut!!),
+                    )
+                    // Verify rebuilt base by re-opening it and
+                    // decoding TMP/Texture with the same trees, as
+                    // in VM patcher/pipeline tests (rebuilt objects
+                    // must equal patched objects, counts must match).
+                    rebuiltStaged = File(dir, "persian-rebuilt-data-${System.nanoTime()}.bin")
+                    val rebuilt = UnityBaseData.openBaseFile(rebuiltBase!!, rebuiltStaged!!)
+                    val rebuiltTmp = UnityBaseData.decodeWithExternalTree(tmpTree, UnityBaseData.readRawObject(rebuilt, tmpSlot), rebuilt.index.bigEndian)
+                    val rebuiltTex = UnityBaseData.decodeWithExternalTree(texTree, UnityBaseData.readRawObject(rebuilt, texSlot), rebuilt.index.bigEndian)
+                    if (rebuiltTmp !is UVal.Struct || rebuiltTex !is UVal.Struct) {
+                        throw UnityFormatException("Rebuilt base TMP/Texture is not a Struct (rebuild verification failed)")
+                    }
+                    val rebuiltGlyphs = (rebuiltTmp.fields["m_GlyphTable"] as? UVal.Arr)?.items?.size
+                    val rebuiltChars = (rebuiltTmp.fields["m_CharacterTable"] as? UVal.Arr)?.items?.size
+                    val expectedGlyphs = (pipelineResult.patchedTmp.fields["m_GlyphTable"] as? UVal.Arr)?.items?.size
+                    if (rebuiltGlyphs != expectedGlyphs || rebuiltChars != expectedGlyphs) {
+                        throw UnityFormatException("Rebuilt base glyph/char counts do not match patched TMP (rebuild verification failed)")
+                    }
+                    // 7. Stage PUA I2 terms (same overlay +
+                    // round-trip path as plain Apply). Terms not in
+                    // validTerms keep old target values (withValues
+                    // preserves missing keys); skipped terms are in
+                    // persianIssues, not silently dropped.
+                    val finalByKey = validTerms.mapIndexed { i, term ->
+                        term.termKey to pipelineResult.finalTerms[i]
+                    }.toMap()
+                    val originalByKey = selected.terms.associateBy { it.key }
+                    val valuesByKey = finalByKey.mapValues { (key, puaTerm) ->
+                        val oldValues = originalByKey[key]?.values
+                            ?: throw UnityFormatException("Persian Apply: valid term key '$key' not in selected table (placeholder validation missed an unknown key)")
+                        oldValues.toMutableList().apply { set(targetIndex, puaTerm) }
+                    }
+                    val updated = selected.withValues(valuesByKey)
+                    val rewritten = tables.map { table ->
+                        if (table.origin.tableId == selected.origin.tableId) updated else table
+                    }
+                    stagedI2 = File(
+                        dir,
+                        "localization-persian-${entry.name.hashCode().toUInt().toString(16)}-${System.nanoTime()}.bin",
+                    )
+                    val existingEntryReplacement = startingState.replacements[entry.name]
+                    if (existingEntryReplacement != null) {
+                        UnityLocalizationOverlay.write(existingEntryReplacement, rewritten, stagedI2!!, dir)
+                    } else {
+                        doc.writeLocalizationReplacement(entry, rewritten, stagedI2!!)
+                    }
+                    verifyLocalizationRoundTrip(stagedI2!!, rewritten, dir)
+                    // Success: rebuilt base CRC (MT Manager format:
+                    // hex, uppercase, 8 digits, as for Bendy).
+                    val rebuiltBytes = rebuiltBase!!.readBytes()
+                    val crcHex = CRC32().apply { update(rebuiltBytes) }.value.toString(16).uppercase().padStart(8, '0')
+                    val stats = pipelineResult.stats
+                    val statsText = getApplication<Application>().getString(
+                        R.string.unity_persian_apply_stats,
+                        validTerms.size,
+                        stats.distinctWordCount,
+                        stats.totalWordOccurrences,
+                        stats.bakedWordOccurrences,
+                        stats.letterFallbackOccurrences,
+                        stats.atlasSize,
+                        stats.atlasGrowthText,
+                    )
+                    val doneMessage = if (placeholderIssues.isEmpty()) {
+                        getApplication<Application>().getString(
+                            R.string.unity_persian_apply_done,
+                            validTerms.size,
+                            stats.distinctWordCount,
+                            stats.atlasSize,
+                            stats.atlasGrowthText,
+                            rebuiltBase!!.name,
+                            rebuiltBase!!.length(),
+                            crcHex,
+                        )
+                    } else {
+                        getApplication<Application>().getString(
+                            R.string.unity_persian_apply_done_skipped,
+                            validTerms.size,
+                            stats.distinctWordCount,
+                            stats.atlasSize,
+                            stats.atlasGrowthText,
+                            rebuiltBase!!.name,
+                            rebuiltBase!!.length(),
+                            crcHex,
+                            placeholderIssues.size,
+                        )
+                    }
+                    _state.update {
+                        // No withTranslationDerived here: bundle font
+                        // coverage for PUA terms would misleadingly
+                        // report missing PUA glyphs (PUA is covered
+                        // by the patched base fallback, not by bundle
+                        // fonts). Pipeline coverage already gates Apply.
+                        it.copy(
+                            busy = false,
+                            replacements = it.replacements + (entry.name to stagedI2!!),
+                            localizationReplacementEntries = it.localizationReplacementEntries + entry.name,
+                            localizationSources = it.localizationSources + (entry.name to rewritten),
+                            localizationRoundTripStatus = UnityLocalizationRoundTripStatus.PASSED,
+                            localizationRoundTripDetail = getApplication<Application>().getString(R.string.unity_round_trip_verified),
+                            fontCoverage = null,
+                            persianReady = true,
+                            persianIssues = placeholderIssues,
+                            persianStatsText = statsText,
+                            persianApplied = true,
+                            persianPatchedBaseFile = rebuiltBase,
+                                persianPatchedBaseCrc = crcHex,
+                            message = doneMessage,
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                stagedI2?.delete()
+                rebuiltBase?.delete()
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        localizationRoundTripStatus = UnityLocalizationRoundTripStatus.NOT_RUN,
+                        localizationRoundTripDetail = null,
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                    )
+                }
+                throw e
+            } catch (e: Exception) {
+                stagedI2?.delete()
+                rebuiltBase?.delete()
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        localizationRoundTripStatus = UnityLocalizationRoundTripStatus.FAILED,
+                        localizationRoundTripDetail = e.message,
+                        persianApplied = false,
+                        persianPatchedBaseFile = null,
+                                persianPatchedBaseCrc = null,
+                        message = localizationFailureMessage(e),
+                    )
+                }
+            } finally {
+                baseTemp?.delete()
+                sceneTemp?.delete()
+                fontTemp?.delete()
+                baseStaged?.delete()
+                rebuiltStaged?.delete()
+                tmpOut?.delete()
+                texOut?.delete()
+                sceneCacheDir?.deleteRecursively()
+            }
+        }
+    }
+
+    private fun copyUriToStageFile(
+        resolver: ContentResolver,
+        uri: Uri,
+        dir: File,
+        prefix: String,
+        suffix: String,
+    ): File {
+        val out = File(dir, prefix + System.nanoTime() + suffix)
+        val input = resolver.openInputStream(uri)
+            ?: throw IOException("Could not open selected file")
+        input.use { stream ->
+            FileOutputStream(out).use { output -> stream.copyTo(output) }
+        }
+        return out
     }
 
     fun estimateRewrite(): UnityBundleRewriteEstimate? = document?.estimateRewrite()

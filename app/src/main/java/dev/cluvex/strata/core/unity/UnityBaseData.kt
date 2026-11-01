@@ -188,6 +188,24 @@ internal object UnityBaseData {
     }
 
     /**
+     * Finds a Texture2D tree (classId 28) in the FIRST CAB file of a
+     * bundle's staged data stream, mirroring [findFontTree]. Texture2D
+     * trees are per class, not per object, so the first Texture2D
+     * tree in the scene bundle is the tree for the fallback atlas
+     * Texture2D in the base file (same Unity version). Returns null
+     * when no Texture2D object is in the first CAB.
+     */
+    fun findTextureTree(bundleDataFile: File): TypeTree? {
+        val (_, index) = SerializedFileReader.parseEmbedded(bundleDataFile, 0L, bundleDataFile.length())
+        for (slot in index.slots) {
+            if (slot.classId != 28) continue
+            val tree = index.trees.getOrNull(slot.typeIndex) ?: continue
+            return tree
+        }
+        return null
+    }
+
+    /**
      * Rebuilds a base file with replaced objects (keys are exact
      * entry names, e.g. "#3 MonoBehaviour", from summary.entries).
      * See SerializedFileIndex.rebuild for alignment, header and

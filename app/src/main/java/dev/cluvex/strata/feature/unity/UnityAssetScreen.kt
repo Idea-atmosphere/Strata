@@ -1,6 +1,7 @@
 package dev.cluvex.strata.feature.unity
 
 import android.content.ActivityNotFoundException
+import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
 import androidx.activity.compose.BackHandler
@@ -258,6 +259,42 @@ fun UnityAssetScreen(
         }
         pendingRawFontTarget = null
         pendingRawFontMerge = false
+    }
+
+    // Persian Apply pickers (Phase 4 part 4, global, not per-entry:
+    // the I2 entry comes from the selected table, not from a tapped
+    // row). All use "*/*": base .bin, scene .bundle and TTF files
+    // have no reliable picker mime type, so filtering would hide them.
+    val persianBasePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.setPersianBaseFallbackUri(uri)
+    }
+
+    val persianScenePicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.setPersianSceneBundleUri(uri)
+    }
+
+    val persianFontPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.setPersianFontUri(uri)
+    }
+
+    val persianBaseExportPicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
+        val file = state.persianPatchedBaseFile
+        if (uri != null && file != null) {
+            scope.launch {
+                localBusy = true
+                try {
+                    withContext(Dispatchers.IO) {
+                        val target = context.contentResolver.openOutputStream(uri) ?: throw IOException("Export destination unavailable")
+                        target.use { out -> file.inputStream().buffered().use { it.copyTo(out) } }
+                    }
+                    vm.notifyMessage(context.getString(R.string.unity_persian_base_export_done, uri.lastPathSegment ?: file.name))
+                } catch (_: Exception) {
+                    vm.notifyMessage(context.getString(R.string.unity_operation_failed))
+                } finally {
+                    localBusy = false
+                }
+            }
+        }
     }
 
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
@@ -530,6 +567,10 @@ fun UnityAssetScreen(
                         }
                     }
 
+                    val selectedPersianTable = state.localizationSources.values.flatten()
+                        .firstOrNull { it.origin.tableId == state.selectedLocalizationTableId }
+                    val persianEntry = document.summary.entries
+                        .firstOrNull { it.name == selectedPersianTable?.origin?.entryName }
                     PersianModeActions(
                         busy = busy,
                         persianMode = state.persianMode,
@@ -537,10 +578,23 @@ fun UnityAssetScreen(
                         persianReady = state.persianReady,
                         persianIssues = state.persianIssues,
                         persianStatsText = state.persianStatsText,
+                        persianBaseFallbackUri = state.persianBaseFallbackUri,
+                        persianSceneBundleUri = state.persianSceneBundleUri,
+                        persianFontUri = state.persianFontUri,
+                        persianApplied = state.persianApplied,
+                        persianPatchedBaseFile = state.persianPatchedBaseFile,
+                        persianPatchedBaseCrc = state.persianPatchedBaseCrc,
+                        persianEntry = persianEntry,
                         onTogglePersianMode = vm::setPersianMode,
                         onLoadTerms = vm::loadPersianTermsFromImportPlan,
                         onCheckReadiness = vm::checkPersianReadiness,
                         onSetPersianTerm = vm::setPersianTerm,
+                        onPickBaseFallback = { persianBasePicker.launch(arrayOf("*/*")) },
+                        onPickSceneBundle = { persianScenePicker.launch(arrayOf("*/*")) },
+                        onPickFont = { persianFontPicker.launch(arrayOf("*/*")) },
+                        onApplyPersian = { entry -> vm.applyPersianPlan(entry, context.contentResolver) },
+                        onClearPersianApply = vm::clearPersianApply,
+                        onExportPersianBase = { persianBaseExportPicker.launch("persian-fallback.bin") },
                     )
 
                     val changedCount = state.replacements.size + state.editedFiles.keys.count { it !in state.replacements }
@@ -988,10 +1042,23 @@ private fun PersianModeActions(
     persianReady: Boolean,
     persianIssues: List<String>,
     persianStatsText: String?,
+    persianBaseFallbackUri: Uri?,
+    persianSceneBundleUri: Uri?,
+    persianFontUri: Uri?,
+    persianApplied: Boolean,
+    persianPatchedBaseFile: File?,
+    persianPatchedBaseCrc: String?,
+    persianEntry: UnityBundleEntry?,
     onTogglePersianMode: (Boolean) -> Unit,
     onLoadTerms: () -> Unit,
     onCheckReadiness: () -> Unit,
     onSetPersianTerm: (String, String) -> Unit,
+    onPickBaseFallback: () -> Unit,
+    onPickSceneBundle: () -> Unit,
+    onPickFont: () -> Unit,
+    onApplyPersian: (UnityBundleEntry) -> Unit,
+    onClearPersianApply: () -> Unit,
+    onExportPersianBase: () -> Unit,
 ) {
     // Term editor is collapsed by default (remember, no key, so it
     // stays open across term edits; a keyed remember would collapse
@@ -1000,8 +1067,9 @@ private fun PersianModeActions(
     // (e.g. subtitles, 397 terms) do not compose 397 TextFields at
     // once. Term editing in v1 is via TSV import + Load terms, plus
     // this in-app editor; full baking / patching (base fallback +
-    // font) is Phase 4 part 4, not here. Readiness here is
-    // preliminary only (shaping / mapping / ranking).
+    // font) is the Apply section below (Phase 4 part 4). The
+    // Check readiness button above is preliminary only (shaping /
+    // mapping / ranking); Apply runs the full pipeline.
     var showTerms by remember { mutableStateOf(false) }
     Surface(
         shape = RoundedCornerShape(20.dp),
@@ -1040,7 +1108,10 @@ private fun PersianModeActions(
                         color = MaterialTheme.colorScheme.onSurfaceVariant,
                     )
                 }
-                if (persianReady) {
+                // Preliminary note only when ready but NOT yet
+                // applied: after a successful Apply, full baking
+                // already happened, so this note would be wrong.
+                if (persianReady && !persianApplied) {
                     Text(
                         stringResource(R.string.unity_persian_preliminary_note),
                         style = MaterialTheme.typography.bodySmall,
@@ -1049,6 +1120,88 @@ private fun PersianModeActions(
                 }
                 for (issue in persianIssues) {
                     Text("• $issue", style = MaterialTheme.typography.bodySmall)
+                }
+                // Full Apply (Phase 4 part 4): pick the three files
+                // first (stored in ViewModel, surviving rotation),
+                // then Apply (needs the selected table's entry; if
+                // no table is selected, the button stays disabled
+                // with a hint, instead of staging into the wrong
+                // bundle). Scene-bundle opening can take minutes
+                // for large bundles; the busy spinner covers it in
+                // v1 (no progress percentage yet).
+                OutlinedButton(onClick = onPickBaseFallback, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        if (persianBaseFallbackUri != null) {
+                            stringResource(R.string.unity_persian_picked_base)
+                        } else {
+                            stringResource(R.string.unity_persian_pick_base)
+                        },
+                        maxLines = 1,
+                    )
+                }
+                OutlinedButton(onClick = onPickSceneBundle, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        if (persianSceneBundleUri != null) {
+                            stringResource(R.string.unity_persian_picked_scene)
+                        } else {
+                            stringResource(R.string.unity_persian_pick_scene)
+                        },
+                        maxLines = 1,
+                    )
+                }
+                OutlinedButton(onClick = onPickFont, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text(
+                        if (persianFontUri != null) {
+                            stringResource(R.string.unity_persian_picked_font)
+                        } else {
+                            stringResource(R.string.unity_persian_pick_font)
+                        },
+                        maxLines = 1,
+                    )
+                }
+                if (persianEntry == null) {
+                    Text(
+                        stringResource(R.string.unity_persian_no_table),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Button(
+                    onClick = { persianEntry?.let(onApplyPersian) },
+                    enabled = !busy && persianTerms.isNotEmpty() && persianEntry != null &&
+                        persianBaseFallbackUri != null && persianSceneBundleUri != null && persianFontUri != null,
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.unity_persian_apply), maxLines = 1)
+                }
+                if (persianApplied && persianPatchedBaseFile != null) {
+                    Text(
+                        stringResource(
+                            R.string.unity_persian_patched_base,
+                            persianPatchedBaseFile.name,
+                            persianPatchedBaseFile.length(),
+                        ),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    if (persianPatchedBaseCrc != null) {
+                        Text(
+                            stringResource(R.string.unity_persian_patched_base_crc, persianPatchedBaseCrc),
+                            style = MaterialTheme.typography.bodySmall,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        )
+                    }
+                    Text(
+                        stringResource(R.string.unity_persian_base_install_note),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                    OutlinedButton(onClick = onExportPersianBase, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.unity_persian_export_base), maxLines = 1)
+                    }
+                    OutlinedButton(onClick = onClearPersianApply, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                        Text(stringResource(R.string.unity_persian_clear_apply), maxLines = 1)
+                    }
                 }
                 if (persianTerms.isNotEmpty()) {
                     OutlinedButton(
