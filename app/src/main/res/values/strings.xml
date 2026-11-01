@@ -26,4 +26,17 @@
     <string name="unity_localization_tsv_invalid">The localization TSV is invalid</string>
     <string name="unity_localization_conflict">The localization table changed before apply</string>
     <string name="unity_localization_size_guard">Output growth exceeded the localization safety limit</string>
+    <string name="unity_persian_title">Persian mode</string>
+    <string name="unity_persian_note_transforms_off">Persian mode shapes and maps terms internally, so the 3 transform checkboxes are forced off. Turning Persian mode off does not restore them.</string>
+    <string name="unity_persian_load_terms">Load terms from import plan</string>
+    <string name="unity_persian_no_plan">No import or add-language plan: import edited TSV with Persian terms first, then load terms.</string>
+    <string name="unity_persian_no_target">Select a target language first.</string>
+    <string name="unity_persian_terms_loaded">%1$d Persian terms loaded</string>
+    <string name="unity_persian_check_readiness">Check Persian readiness</string>
+    <string name="unity_persian_readiness_stats">%1$d terms · %2$d distinct words · %3$d occurrences · %4$d overflow words (as letters) · recommended atlas %5$d</string>
+    <string name="unity_persian_no_terms">No Persian terms: load terms from an import plan, or type them in the editor.</string>
+    <string name="unity_persian_show_terms">Show terms (%1$d)</string>
+    <string name="unity_persian_hide_terms">Hide terms</string>
+    <string name="unity_persian_preliminary_note">Preliminary only: shaping, mapping, and ranking passed. Full baking still needs a Persian font and an original base fallback.</string>
+    <string name="unity_persian_term_label">Term %1$s</string>
 </resources>

@@ -45,11 +45,15 @@ import dev.cluvex.strata.core.unity.UnityLocalizationScanReport
 import dev.cluvex.strata.core.unity.UnityLocalizationScanRequest
 import dev.cluvex.strata.core.unity.UnityLocalizationOperations
 import dev.cluvex.strata.core.unity.UnityLocalizationTsv
+import dev.cluvex.strata.core.unity.UnityPersianApplyPipeline
+import dev.cluvex.strata.core.unity.UnityPersianFrequency
+import dev.cluvex.strata.core.unity.UnityPersianWordMapper
 import dev.cluvex.strata.core.unity.UnityProbe
 import dev.cluvex.strata.core.unity.UnityRtlFlagInference
 import dev.cluvex.strata.core.unity.UnityRtlFlagInferer
 import dev.cluvex.strata.core.unity.UnityTextInfo
 import dev.cluvex.strata.core.unity.UnityTextInspection
+import dev.cluvex.strata.core.unity.UnityTextShaper
 import dev.cluvex.strata.core.unity.UnityTextTransformOptions
 import dev.cluvex.strata.core.unity.UnityTextUnavailableReason
 import dev.cluvex.strata.core.unity.UnityTranslationFontCoverage
@@ -155,6 +159,19 @@ data class UnityAssetUiState(
     val output: File? = null,
     val outputSigningHandoff: UnityApkSigningHandoffState = UnityApkSigningHandoffState.NOT_APK,
     val message: String? = null,
+    // Persian mode (Phase 4, additive, defaults keep existing flows unchanged).
+    // Term editing in v1 is via TSV import (existing flow) + Load terms,
+    // plus in-app editing in the Persian section below; full baking /
+    // patching (base fallback + font) is Phase 4 part 4, not here.
+    // Readiness here is PRELIMINARY only (shaping / mapping / ranking);
+    // it does not check font coverage or base fallback, which the full
+    // pipeline checks. Public types only (no internal PipelineResult
+    // in UiState, which would break the public API).
+    val persianMode: Boolean = false,
+    val persianTerms: Map<String, String> = emptyMap(),
+    val persianReady: Boolean = false,
+    val persianIssues: List<String> = emptyList(),
+    val persianStatsText: String? = null,
 ) {
     val outputNeedsSigning: Boolean
         get() = outputSigningHandoff == UnityApkSigningHandoffState.SIGNING_REQUIRED
@@ -1571,6 +1588,164 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         exportedBaselines = emptyMap()
         _state.update {
             it.copy(textTransformOptions = it.textTransformOptions.copy(normalizePersian = enabled))
+        }
+    }
+
+    // ---- Persian mode (Phase 4, part 3) ----
+    // Toggling ON forces the 3 transform checkboxes OFF: the Persian
+    // pipeline shapes + maps internally (UnityPersianApplyPipeline),
+    // so I2 Apply must NOT re-shape / re-Bidi PUA text (that would
+    // break visual order). Toggling OFF does not restore previous
+    // transform settings; the user re-enables them manually if needed.
+    // Terms are preserved across toggles (edits are not lost).
+    fun setPersianMode(enabled: Boolean) {
+        exportedBaselines = emptyMap()
+        _state.update {
+            it.copy(
+                persianMode = enabled,
+                textTransformOptions = if (enabled) UnityTextTransformOptions() else it.textTransformOptions,
+            )
+        }
+    }
+
+    fun setPersianTerm(termKey: String, text: String) {
+        // Editing a term invalidates preliminary readiness (terms
+        // changed since the last check); the user re-checks explicitly.
+        _state.update {
+            it.copy(
+                persianTerms = it.persianTerms + (termKey to text),
+                persianReady = false,
+                persianIssues = emptyList(),
+                persianStatsText = null,
+            )
+        }
+    }
+
+    // Loads Persian terms from the current import / add-language plan's
+    // updated source, for the selected target language. The plan comes
+    // from the existing TSV import flow (user edits TSV externally
+    // with Persian text, imports, then loads here for in-app editing
+    // and readiness checking). No plan -> no load (clear message in
+    // the Persian section, not a crash, and not a load of original
+    // (non-Persian) terms as if they were Persian).
+    fun loadPersianTermsFromImportPlan() {
+        val state = _state.value
+        val updated = when {
+            state.localizationAddPlan?.canApply == true -> state.localizationAddPlan.updated
+            state.localizationImportPlan?.canApply == true -> state.localizationImportPlan.updated
+            else -> null
+        }
+        if (updated == null) {
+            _state.update {
+                it.copy(
+                    persianReady = false,
+                    persianIssues = listOf(
+                        getApplication<Application>().getString(R.string.unity_persian_no_plan),
+                    ),
+                    persianStatsText = null,
+                )
+            }
+            return
+        }
+        val targetCode = state.localizationTargetLanguageCode
+        val targetIndex = targetCode?.let { updated.languageIndex(it) } ?: -1
+        if (targetIndex < 0) {
+            _state.update {
+                it.copy(
+                    persianReady = false,
+                    persianIssues = listOf(
+                        getApplication<Application>().getString(R.string.unity_persian_no_target),
+                    ),
+                    persianStatsText = null,
+                )
+            }
+            return
+        }
+        val loaded = updated.terms.associate { term -> term.key to (term.values[targetIndex] ?: "") }
+        _state.update {
+            it.copy(
+                persianTerms = loaded,
+                persianReady = false,
+                persianIssues = emptyList(),
+                persianStatsText = null,
+                message = getApplication<Application>().getString(
+                    R.string.unity_persian_terms_loaded,
+                    loaded.size,
+                ),
+            )
+        }
+    }
+
+    // Preliminary Persian readiness: shaping + mapping + ranking only
+    // (no font, no base fallback, no baking). Fast, pure CPU work on
+    // IO (same pattern as planLocalizationImport), so the UI stays
+    // responsive for large tables (e.g. subtitles, 397 terms).
+    // A passing preliminary check does NOT mean the full pipeline
+    // will succeed (font coverage and base fallback are checked by
+    // the full pipeline in part 4); a failing check DOES mean Apply
+    // must be blocked (unmapped codes would render as squares).
+    fun checkPersianReadiness() {
+        val startingState = _state.value
+        if (startingState.busy) return
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            try {
+                val terms = startingState.persianTerms.entries.map { (key, text) ->
+                    UnityPersianApplyPipeline.PersianTermInput(key, text)
+                }
+                val (ready, issues, statsText) = runInterruptible(Dispatchers.IO) {
+                    if (terms.isEmpty()) {
+                        Triple(
+                            false,
+                            listOf(
+                                getApplication<Application>().getString(R.string.unity_persian_no_terms),
+                            ),
+                            null as String?,
+                        )
+                    } else {
+                        val shapeOptions = UnityTextTransformOptions(
+                            shapeArabic = true,
+                            reverseBidi = true,
+                            normalizePersian = true,
+                        )
+                        val shaped = terms.map { UnityTextShaper.transform(it.persianText, shapeOptions) }
+                        val batch = UnityPersianWordMapper.mapShapedTerms(shaped)
+                        if (batch.unmappedCodepoints.isNotEmpty()) {
+                            val unmappedIssues = batch.unmappedCodepoints.sorted().map { code ->
+                                "Unmapped codepoint U+" + code.toString(16).uppercase().padStart(4, '0') +
+                                    " (logical Arabic the shaper did not shape, or extension block exhausted)"
+                            }
+                            Triple(false, unmappedIssues, null as String?)
+                        } else {
+                            val ranked = UnityPersianFrequency.rankWords(batch.mappedTerms, batch.wordMap)
+                            val totalOcc = ranked.sumOf { it.frequency }
+                            val recommended = UnityPersianFrequency.recommendAtlasSize(batch.wordMap.size)
+                            val text = getApplication<Application>().getString(
+                                R.string.unity_persian_readiness_stats,
+                                terms.size,
+                                batch.wordMap.size,
+                                totalOcc,
+                                batch.overflowWords.size,
+                                recommended,
+                            )
+                            Triple(true, emptyList<String>(), text)
+                        }
+                    }
+                }
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        persianReady = ready,
+                        persianIssues = issues,
+                        persianStatsText = statsText,
+                    )
+                }
+            } catch (e: CancellationException) {
+                _state.update { it.copy(busy = false, message = getApplication<Application>().getString(R.string.unity_operation_cancelled)) }
+                throw e
+            } catch (e: Exception) {
+                _state.update { it.copy(busy = false, message = localizationFailureMessage(e)) }
+            }
         }
     }
 

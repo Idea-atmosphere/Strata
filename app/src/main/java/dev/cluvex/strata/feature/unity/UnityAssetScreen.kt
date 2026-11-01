@@ -14,6 +14,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.lazy.LazyColumn
@@ -529,6 +530,19 @@ fun UnityAssetScreen(
                         }
                     }
 
+                    PersianModeActions(
+                        busy = busy,
+                        persianMode = state.persianMode,
+                        persianTerms = state.persianTerms,
+                        persianReady = state.persianReady,
+                        persianIssues = state.persianIssues,
+                        persianStatsText = state.persianStatsText,
+                        onTogglePersianMode = vm::setPersianMode,
+                        onLoadTerms = vm::loadPersianTermsFromImportPlan,
+                        onCheckReadiness = vm::checkPersianReadiness,
+                        onSetPersianTerm = vm::setPersianTerm,
+                    )
+
                     val changedCount = state.replacements.size + state.editedFiles.keys.count { it !in state.replacements }
                     if (changedCount > 0) {
                         Text(
@@ -960,6 +974,125 @@ private fun UnityEntryActions(
                 }
                 Button(onClick = onExportTexts, enabled = !busy, modifier = Modifier.fillMaxWidth().padding(top = 6.dp)) {
                     Text(stringResource(R.string.unity_export_texts), maxLines = 1)
+                }
+            }
+        }
+    }
+}
+
+@Composable
+private fun PersianModeActions(
+    busy: Boolean,
+    persianMode: Boolean,
+    persianTerms: Map<String, String>,
+    persianReady: Boolean,
+    persianIssues: List<String>,
+    persianStatsText: String?,
+    onTogglePersianMode: (Boolean) -> Unit,
+    onLoadTerms: () -> Unit,
+    onCheckReadiness: () -> Unit,
+    onSetPersianTerm: (String, String) -> Unit,
+) {
+    // Term editor is collapsed by default (remember, no key, so it
+    // stays open across term edits; a keyed remember would collapse
+    // on every keystroke). LazyColumn with a fixed height scrolls
+    // independently and composes only visible terms, so large tables
+    // (e.g. subtitles, 397 terms) do not compose 397 TextFields at
+    // once. Term editing in v1 is via TSV import + Load terms, plus
+    // this in-app editor; full baking / patching (base fallback +
+    // font) is Phase 4 part 4, not here. Readiness here is
+    // preliminary only (shaping / mapping / ranking).
+    var showTerms by remember { mutableStateOf(false) }
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Row(Modifier.fillMaxWidth(), verticalAlignment = Alignment.CenterVertically) {
+                Checkbox(
+                    checked = persianMode,
+                    onCheckedChange = onTogglePersianMode,
+                    enabled = !busy,
+                )
+                Text(stringResource(R.string.unity_persian_title), style = MaterialTheme.typography.titleSmall)
+            }
+            if (persianMode) {
+                Text(
+                    stringResource(R.string.unity_persian_note_transforms_off),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(onClick = onLoadTerms, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.unity_persian_load_terms), maxLines = 1)
+                }
+                Button(
+                    onClick = onCheckReadiness,
+                    enabled = !busy && persianTerms.isNotEmpty(),
+                    modifier = Modifier.fillMaxWidth(),
+                ) {
+                    Text(stringResource(R.string.unity_persian_check_readiness), maxLines = 1)
+                }
+                persianStatsText?.let { stats ->
+                    Text(
+                        stats,
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                if (persianReady) {
+                    Text(
+                        stringResource(R.string.unity_persian_preliminary_note),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                for (issue in persianIssues) {
+                    Text("• $issue", style = MaterialTheme.typography.bodySmall)
+                }
+                if (persianTerms.isNotEmpty()) {
+                    OutlinedButton(
+                        onClick = { showTerms = !showTerms },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    ) {
+                        Text(
+                            if (showTerms) {
+                                stringResource(R.string.unity_persian_hide_terms)
+                            } else {
+                                stringResource(R.string.unity_persian_show_terms, persianTerms.size)
+                            },
+                            maxLines = 1,
+                        )
+                    }
+                    if (showTerms) {
+                        // Fixed height is REQUIRED: a LazyColumn inside
+                        // a non-scrollable Column needs bounded height,
+                        // otherwise it measures with infinite height
+                        // (or overflows the screen). 400 dp shows a
+                        // handful of terms and scrolls for the rest,
+                        // without composing all terms at once.
+                        LazyColumn(
+                            modifier = Modifier.fillMaxWidth().height(400.dp).padding(top = 4.dp),
+                            verticalArrangement = Arrangement.spacedBy(4.dp),
+                        ) {
+                            items(persianTerms.entries.toList(), key = { it.key }) { (termKey, persianText) ->
+                                OutlinedTextField(
+                                    value = persianText,
+                                    onValueChange = { onSetPersianTerm(termKey, it) },
+                                    label = {
+                                        Text(
+                                            stringResource(R.string.unity_persian_term_label, termKey),
+                                            maxLines = 1,
+                                        )
+                                    },
+                                    modifier = Modifier.fillMaxWidth(),
+                                    enabled = !busy,
+                                    singleLine = false,
+                                )
+                            }
+                        }
+                    }
                 }
             }
         }
