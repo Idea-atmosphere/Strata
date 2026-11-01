@@ -330,6 +330,7 @@ object UnitySdfBaker {
         pad: Int = 9,
         rightPadPx: Int = 30,
         margin: Int = 20,
+        preserveInputOrder: Boolean = false,
     ): BakedAtlas {
         val glyphs = ArrayList<GlyphToBake>(letters.size + words.size)
         for (letter in letters) {
@@ -361,7 +362,7 @@ object UnitySdfBaker {
                 ),
             )
         }
-        return bake(glyphs, atlasSize, originalAtlasSize, originalAtlasBytes, pad, rightPadPx)
+        return bake(glyphs, atlasSize, originalAtlasSize, originalAtlasBytes, pad, rightPadPx, preserveInputOrder)
     }
 
     // ---- Packing + atlas (Python pack_strip, sort keys, strip orders) ----
@@ -412,7 +413,22 @@ object UnitySdfBaker {
         return placed to remaining
     }
 
-    /** Bake glyphs into an atlas, preserving the original atlas area. */
+    /**
+     * Bake glyphs into an atlas, preserving the original atlas area.
+     *
+     * @param preserveInputOrder when false (default, Phase 2 behaviour),
+     *   glyphs are re-sorted by size (Python's sort keys) to maximise
+     *   the number packed, which is correct when everything fits.
+     *   When true (Phase 4 frequency packing), glyphs are packed in
+     *   input order, Right strip first then Bottom strip, with NO
+     *   size re-sorting, so earlier glyphs (letters first, then words
+     *   in frequency order, as supplied by the caller via
+     *   UnityPersianFrequency) win atlas space and later glyphs are
+     *   the ones reported as unpacked. Use true for large
+     *   vocabularies; size-sorted packing could otherwise evict a
+     *   frequent word (or even a letter, which letter fallback depends
+     *   on) in favour of a large rare word.
+     */
     fun bake(
         glyphs: List<GlyphToBake>,
         atlasSize: Int,
@@ -420,6 +436,7 @@ object UnitySdfBaker {
         originalAtlasBytes: ByteArray?,
         pad: Int = 9,
         rightPadPx: Int = 30,
+        preserveInputOrder: Boolean = false,
     ): BakedAtlas {
         require(atlasSize > 0 && originalAtlasSize >= 0 && originalAtlasSize <= atlasSize &&
             pad >= 1 && rightPadPx >= 0) {
@@ -492,22 +509,40 @@ object UnitySdfBaker {
         )
         var bestPlaced: List<Placed>? = null
         var bestRemaining: List<PreparedGlyph> = prepared
-        outer@ for (sortKey in sortKeys) {
-            val sorted = prepared.sortedWith(sortKey)
-            for (order in stripOrders) {
-                var placed: List<Placed> = emptyList()
-                var remaining: List<PreparedGlyph> = sorted
-                for (strip in order) {
-                    val (p, r) = packStrip(remaining, strip, pad)
-                    placed = placed + p
-                    remaining = r
-                    if (remaining.isEmpty()) break
+        if (preserveInputOrder) {
+            // Single attempt, input order, Right strip first then
+            // Bottom strip (stripOrders[0] is exactly that order, or
+            // the single full-atlas strip when original==0). No
+            // size re-sorting, no best-by-count search across strip
+            // orders: frequency order must decide who fits, not size.
+            var placed: List<Placed> = emptyList()
+            var remaining: List<PreparedGlyph> = prepared
+            for (strip in stripOrders[0]) {
+                val (p, r) = packStrip(remaining, strip, pad)
+                placed = placed + p
+                remaining = r
+                if (remaining.isEmpty()) break
+            }
+            bestPlaced = placed
+            bestRemaining = remaining
+        } else {
+            outer@ for (sortKey in sortKeys) {
+                val sorted = prepared.sortedWith(sortKey)
+                for (order in stripOrders) {
+                    var placed: List<Placed> = emptyList()
+                    var remaining: List<PreparedGlyph> = sorted
+                    for (strip in order) {
+                        val (p, r) = packStrip(remaining, strip, pad)
+                        placed = placed + p
+                        remaining = r
+                        if (remaining.isEmpty()) break
+                    }
+                    if (bestPlaced == null || placed.size > bestPlaced.size) {
+                        bestPlaced = placed
+                        bestRemaining = remaining
+                    }
+                    if (remaining.isEmpty()) break@outer
                 }
-                if (bestPlaced == null || placed.size > bestPlaced.size) {
-                    bestPlaced = placed
-                    bestRemaining = remaining
-                }
-                if (remaining.isEmpty()) break@outer
             }
         }
         val placed = bestPlaced ?: emptyList()

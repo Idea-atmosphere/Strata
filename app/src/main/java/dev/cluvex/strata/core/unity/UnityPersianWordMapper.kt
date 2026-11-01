@@ -67,16 +67,18 @@ package dev.cluvex.strata.core.unity
  *   adjacent) is preserved as its PUA character, not word-mapped.
  *
  * Atlas-fit limitation (v1, documented, not hidden):
- * - This mapper assigns a word-PUA code to EVERY distinct word core,
- *   regardless of atlas size. The baker phase must check fit and, when
+ * - This mapper assigns a word-PUA code to every distinct word core,
+ *   up to the PUA word block limit (E200..F8FF, 5,888 codes; cores
+ *   beyond that stay as letter-PUA, see overflowWords). Atlas size
+ *   is a separate limit: the baker phase must check fit and, when
  *   the vocabulary exceeds the atlas (2048 fits ~70 words for Bendy's
  *   warning; 4096 fits roughly 4x that, and CaviarDreams' own 4096 atlas
  *   proves 4096 renders in-game), fall back to letter-PUA rendering for
  *   overflow words instead of emitting a word-PUA code with no glyph
  *   (which would render as a square). Frequency-ordered packing plus
- *   that letter fallback is a later phase; until then, v1 scope is
- *   small vocabularies (menus, warnings, short UI tables), not a full
- *   game's subtitle set at once.
+ *   that letter fallback is UnityPersianFrequency (Phase 4 core);
+ *   until then, v1 scope is small vocabularies (menus, warnings,
+ *   short UI tables), not a full game's subtitle set at once.
  *
  * Legacy compatibility:
  * - The 128-entry ARABIC_TO_PUA table below is EXACTLY the Bendy cipher
@@ -98,6 +100,21 @@ object UnityPersianWordMapper {
 
     /** First word-PUA code assigned by this mapper. */
     const val WORD_PUA_START: Int = 0xE200
+
+    /**
+     * Last word-PUA code this mapper will assign. The BMP private-use
+     * area ends at 0xF8FF, so E200..F8FF holds 5,888 word codes. Past
+     * that, assigning codes would spill into CJK Compatibility
+     * (0xF900+) or, past 0xFFFF, truncate via Char to garbage/null.
+     * Word cores beyond this limit are NOT word-mapped: they stay as
+     * letter-PUA in the output (see [WordSession.overflowWords]) and
+     * must be counted as letter-fallback, never as squares. For
+     * realistic game vocabularies this limit is far away (Bendy's
+     * warning is 70 words, its subtitles ~1-2k words), but a full
+     * game's subtitle set can exceed it, so the guard must exist
+     * before frequency packing, not after a silent overflow.
+     */
+    const val WORD_PUA_END: Int = 0xF8FF
 
     /** First extension-letter PUA code (new letter forms, see above). */
     const val EXTENSION_LETTER_PUA_START: Int = 0xE080
@@ -277,6 +294,16 @@ object UnityPersianWordMapper {
          * set has fewer than 128 forms outside the Bendy table.
          */
         val unmappedCodepoints: Set<Int>,
+        /**
+         * Word cores that could NOT get a word-PUA code because the
+         * PUA word block (E200..F8FF, 5,888 codes) was exhausted.
+         * These cores are left as letter-PUA in [mappedTerms] (not
+         * word-mapped, not dropped, not assigned a garbage code), so
+         * they render as letters (with joining gaps, but readable),
+         * never as squares. Callers must count them as letter
+         * fallback, the same as baker-unpacked words.
+         */
+        val overflowWords: Set<String> = emptySet(),
     )
 
     /**
@@ -297,6 +324,7 @@ object UnityPersianWordMapper {
             wordMap = session.wordMap.toMap(),
             extensionLetters = session.extensionLetters.toMap(),
             unmappedCodepoints = session.unmappedCodepoints.toSet(),
+            overflowWords = session.overflowWords.toSet(),
         )
     }
 
@@ -310,12 +338,14 @@ object UnityPersianWordMapper {
         private val _wordMap = LinkedHashMap<String, Int>()
         private val _extensionLetters = LinkedHashMap<Int, Int>()
         private val _unmapped = LinkedHashSet<Int>()
+        private val _overflowWords = LinkedHashSet<String>()
         private var nextWordCode: Int = WORD_PUA_START
         private var nextExtensionCode: Int = EXTENSION_LETTER_PUA_START
 
         val wordMap: Map<String, Int> get() = _wordMap
         val extensionLetters: Map<Int, Int> get() = _extensionLetters
         val unmappedCodepoints: Set<Int> get() = _unmapped
+        val overflowWords: Set<String> get() = _overflowWords
 
         /** Maps one shaped term, reusing this session's assignments. */
         fun mapTerm(shaped: String): String {
@@ -326,8 +356,22 @@ object UnityPersianWordMapper {
                 if (run.isEmpty()) return
                 val core = run.toString()
                 run.clear()
-                val code = _wordMap.getOrPut(core) { nextWordCode++ }
-                out.append(code.toChar())
+                val existing = _wordMap[core]
+                if (existing != null) {
+                    out.append(existing.toChar())
+                } else if (nextWordCode <= WORD_PUA_END) {
+                    val assigned = nextWordCode
+                    nextWordCode++
+                    _wordMap[core] = assigned
+                    out.append(assigned.toChar())
+                } else {
+                    // PUA word block exhausted: leave the core as
+                    // letter-PUA (readable with gaps, never a square
+                    // or a truncated/garbage code). Record it so the
+                    // caller counts it as letter fallback.
+                    _overflowWords.add(core)
+                    out.append(core)
+                }
             }
             for (ch in pua) {
                 val code = ch.code

@@ -146,4 +146,23 @@ class UnitySdfBakerTest {
         assertThat(baked.unpacked).isNotEmpty()
         assertThat(baked.glyphs.size + baked.unpacked.size).isEqualTo(20)
     }
+
+    @Test
+    fun preserveInputOrderLetsFrequentSmallGlyphWinOverRareLargeGlyph() {
+        // 64x64 atlas, pad 9: small 10x10 -> padded 28x28, large 40x40
+        // -> padded 58x58. Together they do not fit (28+58=86 > 64
+        // width, wrapped height 28+58=86 > 64 height), so only one
+        // packs. Size-sorted packing (default) packs the large glyph
+        // first; frequency-ordered packing (preserveInputOrder=true,
+        // input = frequent small first) packs the frequent glyph.
+        fun solid(pua: Int, w: Int, h: Int) =
+            UnitySdfBaker.GlyphToBake(pua, BooleanArray(w * h) { true }, w, h, (w + 2).toFloat(), 0f, 10f, false)
+        val glyphs = listOf(solid(0xE200, 10, 10), solid(0xE201, 40, 40))
+        val freq = UnitySdfBaker.bake(glyphs, 64, 0, null, pad = 9, rightPadPx = 0, preserveInputOrder = true)
+        assertThat(freq.glyphs.map { it.pua }).containsExactly(0xE200)
+        assertThat(freq.unpacked).containsExactly(0xE201)
+        val sizeSorted = UnitySdfBaker.bake(glyphs, 64, 0, null, pad = 9, rightPadPx = 0, preserveInputOrder = false)
+        assertThat(sizeSorted.glyphs.map { it.pua }).containsExactly(0xE201)
+        assertThat(sizeSorted.unpacked).containsExactly(0xE200)
+    }
 }

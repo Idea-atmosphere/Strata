@@ -93,4 +93,32 @@ class UnityPersianWordMapperTest {
         assertThat(batch.mappedTerms).containsExactly("", "   ", "...").inOrder()
         assertThat(batch.wordMap).isEmpty()
     }
+
+    @Test
+    fun wordPuaOverflowLeavesCoresAsLettersInsteadOfGarbageCodes() {
+        // 5,888 word codes (E200..F8FF) is the BMP PUA limit. Past it,
+        // cores must stay as letter-PUA (readable with gaps), never
+        // spill into CJK (F900+) or truncate via Char past 0xFFFF.
+        // 5,890 distinct 2-letter cores (letters E010..E0FF, avoiding
+        // diacritic PUAs E002..E005 which are stripped) exercise the
+        // guard: 5,888 get codes, the last 2 stay as letters.
+        val letters = (0xE010..0xE0FF).toList()
+        val session = UnityPersianWordMapper.WordSession()
+        var overflowMapped: String? = null
+        for (i in 0 until 5890) {
+            val c1 = letters[(i / letters.size) % letters.size]
+            val c2 = letters[i % letters.size]
+            val core = "${c1.toChar()}${c2.toChar()}"
+            val mapped = session.mapTerm(core)
+            if (i >= 5888) overflowMapped = mapped
+        }
+        assertThat(session.wordMap).hasSize(5888)
+        assertThat(session.wordMap.values.max()).isEqualTo(0xF8FF)
+        assertThat(session.overflowWords).hasSize(2)
+        // The last overflow term mapped to its core itself (2 letters),
+        // not to a word code, CJK char, or truncated null.
+        assertThat(overflowMapped).isNotNull()
+        assertThat(overflowMapped!!.length).isEqualTo(2)
+        assertThat(session.overflowWords).contains(overflowMapped)
+    }
 }
