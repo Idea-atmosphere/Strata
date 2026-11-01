@@ -77,11 +77,11 @@ class UnityPersianTmpPatcherTest {
                         "m_FamilyName" to UVal.Str("Test"),
                     ),
                 ),
-                "m_GlyphTable" to UVal.Arr(glyphs),
-                "m_CharacterTable" to UVal.Arr(chars),
-                "m_AtlasTextures" to UVal.Arr(emptyList()),
-                "m_UsedGlyphRects" to UVal.Arr(listOf(UVal.Struct(linkedMapOf("m_X" to num(0))))),
-                "m_FreeGlyphRects" to UVal.Arr(emptyList()),
+                "m_GlyphTable" to UVal.Arr(ArrayList<UVal>(glyphs)),
+                "m_CharacterTable" to UVal.Arr(ArrayList<UVal>(chars)),
+                "m_AtlasTextures" to UVal.Arr(arrayListOf<UVal>()),
+                "m_UsedGlyphRects" to UVal.Arr(arrayListOf<UVal>(UVal.Struct(linkedMapOf("m_X" to num(0))))),
+                "m_FreeGlyphRects" to UVal.Arr(arrayListOf<UVal>()),
                 "m_fontInfo" to UVal.Struct(
                     linkedMapOf(
                         "AtlasWidth" to flt(999.0),
