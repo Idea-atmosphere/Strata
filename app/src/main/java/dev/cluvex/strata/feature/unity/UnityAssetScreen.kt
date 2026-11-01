@@ -297,6 +297,34 @@ fun UnityAssetScreen(
         }
     }
 
+    // Phase 5 prefab repoint pickers (global, like the Persian
+    // Apply pickers): the prefab file is a standalone serialized
+    // .bin, so OpenDocument "*/*" is used again (no reliable mime
+    // type). The export picker mirrors persianBaseExportPicker.
+    val persianPrefabPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.setPersianPrefabUri(uri)
+    }
+
+    val persianPrefabExportPicker = rememberLauncherForActivityResult(ActivityResultContracts.CreateDocument("*/*")) { uri ->
+        val file = state.persianPrefabPatchedFile
+        if (uri != null && file != null) {
+            scope.launch {
+                localBusy = true
+                try {
+                    withContext(Dispatchers.IO) {
+                        val target = context.contentResolver.openOutputStream(uri) ?: throw IOException("Export destination unavailable")
+                        target.use { out -> file.inputStream().buffered().use { it.copyTo(out) } }
+                    }
+                    vm.notifyMessage(context.getString(R.string.unity_persian_prefab_export_done, uri.lastPathSegment ?: file.name))
+                } catch (_: Exception) {
+                    vm.notifyMessage(context.getString(R.string.unity_operation_failed))
+                } finally {
+                    localBusy = false
+                }
+            }
+        }
+    }
+
     val folderPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocumentTree()) { uri ->
         if (uri != null) {
             val documentId = runCatching { DocumentsContract.getTreeDocumentId(uri) }.getOrNull()
@@ -595,6 +623,35 @@ fun UnityAssetScreen(
                         onApplyPersian = { entry -> vm.applyPersianPlan(entry, context.contentResolver) },
                         onClearPersianApply = vm::clearPersianApply,
                         onExportPersianBase = { persianBaseExportPicker.launch("persian-fallback.bin") },
+                    )
+
+                    // Phase 5: static-prefab repoint. Shown after the
+                    // Persian section, not inside it: it does not need
+                    // persianMode or an open document (the prefab file
+                    // is standalone), and it is the step that makes
+                    // statically-fonted menus render Persian at all.
+                    PersianPrefabRepointActions(
+                        busy = busy,
+                        prefabUri = state.persianPrefabUri,
+                        sourceGuid = state.persianPrefabSourceGuid,
+                        targetGuid = state.persianPrefabTargetGuid,
+                        pptrFromFile = state.persianPrefabPptrFromFile,
+                        pptrFromPath = state.persianPrefabPptrFromPath,
+                        pptrToFile = state.persianPrefabPptrToFile,
+                        pptrToPath = state.persianPrefabPptrToPath,
+                        patchedFile = state.persianPrefabPatchedFile,
+                        patchedCrc = state.persianPrefabPatchedCrc,
+                        report = state.persianPrefabReport,
+                        onPickPrefab = { persianPrefabPicker.launch(arrayOf("*/*")) },
+                        onSourceGuidChange = vm::setPersianPrefabSourceGuid,
+                        onTargetGuidChange = vm::setPersianPrefabTargetGuid,
+                        onPptrFromFileChange = vm::setPersianPrefabPptrFromFile,
+                        onPptrFromPathChange = vm::setPersianPrefabPptrFromPath,
+                        onPptrToFileChange = vm::setPersianPrefabPptrToFile,
+                        onPptrToPathChange = vm::setPersianPrefabPptrToPath,
+                        onRepoint = { vm.repointPersianPrefab(context.contentResolver) },
+                        onClear = vm::clearPersianPrefab,
+                        onExport = { persianPrefabExportPicker.launch("persian-prefab.bin") },
                     )
 
                     val changedCount = state.replacements.size + state.editedFiles.keys.count { it !in state.replacements }
@@ -1246,6 +1303,156 @@ private fun PersianModeActions(
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+// Phase 5: static-prefab repoint section. The prefab file is a
+// standalone serialized .bin (not a bundle entry), so this section
+// does not need persianMode or a selected table. GUID fields are
+// the static font asset's external GUID and the Persian dynamic
+// fallback's external GUID (32 lowercase hex each, validated by
+// the module). PPtr fields are optional: all four blank means
+// GUID-only repoint (Bendy warnings); all four filled means one
+// material PPtr remap as well (Bendy subtitles: from (4, 1) to
+// (3, 1)). A partially filled PPtr is blocked by the ViewModel.
+@Composable
+private fun PersianPrefabRepointActions(
+    busy: Boolean,
+    prefabUri: Uri?,
+    sourceGuid: String,
+    targetGuid: String,
+    pptrFromFile: String,
+    pptrFromPath: String,
+    pptrToFile: String,
+    pptrToPath: String,
+    patchedFile: File?,
+    patchedCrc: String?,
+    report: String?,
+    onPickPrefab: () -> Unit,
+    onSourceGuidChange: (String) -> Unit,
+    onTargetGuidChange: (String) -> Unit,
+    onPptrFromFileChange: (String) -> Unit,
+    onPptrFromPathChange: (String) -> Unit,
+    onPptrToFileChange: (String) -> Unit,
+    onPptrToPathChange: (String) -> Unit,
+    onRepoint: () -> Unit,
+    onClear: () -> Unit,
+    onExport: () -> Unit,
+) {
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(stringResource(R.string.unity_persian_prefab_title), style = MaterialTheme.typography.titleSmall)
+            Text(
+                stringResource(R.string.unity_persian_prefab_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            OutlinedButton(onClick = onPickPrefab, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                Text(
+                    if (prefabUri != null) {
+                        stringResource(R.string.unity_persian_prefab_picked)
+                    } else {
+                        stringResource(R.string.unity_persian_prefab_pick)
+                    },
+                    maxLines = 1,
+                )
+            }
+            OutlinedTextField(
+                value = sourceGuid,
+                onValueChange = onSourceGuidChange,
+                label = { Text(stringResource(R.string.unity_persian_prefab_source_guid), maxLines = 1) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = targetGuid,
+                onValueChange = onTargetGuidChange,
+                label = { Text(stringResource(R.string.unity_persian_prefab_target_guid), maxLines = 1) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = pptrFromFile,
+                onValueChange = onPptrFromFileChange,
+                label = { Text(stringResource(R.string.unity_persian_prefab_pptr_from_file), maxLines = 1) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = pptrFromPath,
+                onValueChange = onPptrFromPathChange,
+                label = { Text(stringResource(R.string.unity_persian_prefab_pptr_from_path), maxLines = 1) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = pptrToFile,
+                onValueChange = onPptrToFileChange,
+                label = { Text(stringResource(R.string.unity_persian_prefab_pptr_to_file), maxLines = 1) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
+                singleLine = true,
+            )
+            OutlinedTextField(
+                value = pptrToPath,
+                onValueChange = onPptrToPathChange,
+                label = { Text(stringResource(R.string.unity_persian_prefab_pptr_to_path), maxLines = 1) },
+                modifier = Modifier.fillMaxWidth(),
+                enabled = !busy,
+                singleLine = true,
+            )
+            Button(
+                onClick = onRepoint,
+                enabled = !busy && prefabUri != null && sourceGuid.isNotBlank() && targetGuid.isNotBlank(),
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(stringResource(R.string.unity_persian_prefab_repoint), maxLines = 1)
+            }
+            report?.let { text ->
+                Text(
+                    text,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (patchedFile != null) {
+                Text(
+                    stringResource(
+                        R.string.unity_persian_prefab_patched,
+                        patchedFile.name,
+                        patchedFile.length(),
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                if (patchedCrc != null) {
+                    Text(
+                        stringResource(R.string.unity_persian_prefab_crc, patchedCrc),
+                        style = MaterialTheme.typography.bodySmall,
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+                Text(
+                    stringResource(R.string.unity_persian_prefab_install_note),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+                OutlinedButton(onClick = onExport, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.unity_persian_prefab_export), maxLines = 1)
+                }
+                OutlinedButton(onClick = onClear, enabled = !busy, modifier = Modifier.fillMaxWidth()) {
+                    Text(stringResource(R.string.unity_persian_prefab_clear), maxLines = 1)
                 }
             }
         }

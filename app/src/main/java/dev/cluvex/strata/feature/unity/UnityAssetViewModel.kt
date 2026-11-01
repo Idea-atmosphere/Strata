@@ -52,6 +52,7 @@ import dev.cluvex.strata.core.unity.UnityPersianApplyPipeline
 import dev.cluvex.strata.core.unity.UnityPersianFontRasterizer
 import dev.cluvex.strata.core.unity.UnityPersianFrequency
 import dev.cluvex.strata.core.unity.UnityPersianPlaceholders
+import dev.cluvex.strata.core.unity.UnityPersianPrefabRepoint
 import dev.cluvex.strata.core.unity.UnityPersianWordMapper
 import dev.cluvex.strata.core.unity.UnityProbe
 import dev.cluvex.strata.core.unity.UnityRtlFlagInference
@@ -200,6 +201,27 @@ data class UnityAssetUiState(
     // lesson). Shown persistently in the Persian section, not only
     // in the transient success message.
     val persianPatchedBaseCrc: String? = null,
+    // Phase 5: standalone prefab repoint (static TMP font -> Persian
+    // dynamic fallback). The prefab file is picked directly (a
+    // serialized .bin, as exported from an installed game), not a
+    // bundle entry: repacking a repointed prefab into a bundle is
+    // NOT in v1. GUID fields are free text (32 lowercase hex);
+    // the module validates them. PPtr fields are free text too:
+    // all four blank means GUID-only repoint (Bendy warnings);
+    // all four filled means GUID + one material PPtr remap
+    // (Bendy subtitles). A partially filled PPtr is blocked.
+    // persianPrefabPatchedFile lives in cacheDir/persian-prefab
+    // until exported, like persianPatchedBaseFile in stageDir.
+    val persianPrefabUri: Uri? = null,
+    val persianPrefabSourceGuid: String = "",
+    val persianPrefabTargetGuid: String = "",
+    val persianPrefabPptrFromFile: String = "",
+    val persianPrefabPptrFromPath: String = "",
+    val persianPrefabPptrToFile: String = "",
+    val persianPrefabPptrToPath: String = "",
+    val persianPrefabPatchedFile: File? = null,
+    val persianPrefabPatchedCrc: String? = null,
+    val persianPrefabReport: String? = null,
 ) {
     val outputNeedsSigning: Boolean
         get() = outputSigningHandoff == UnityApkSigningHandoffState.SIGNING_REQUIRED
@@ -1682,6 +1704,97 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(persianFontUri = uri) }
     }
 
+    // Phase 5 prefab repoint setters. Changing any input clears
+    // the previous patched output (it was built from the old
+    // inputs, like setPersianTerm clearing a stale Apply).
+    fun setPersianPrefabUri(uri: Uri?) {
+        _state.update {
+            it.copy(
+                persianPrefabUri = uri,
+                persianPrefabPatchedFile = null,
+                persianPrefabPatchedCrc = null,
+                persianPrefabReport = null,
+            )
+        }
+    }
+
+    fun setPersianPrefabSourceGuid(guid: String) {
+        _state.update {
+            it.copy(
+                persianPrefabSourceGuid = guid,
+                persianPrefabPatchedFile = null,
+                persianPrefabPatchedCrc = null,
+                persianPrefabReport = null,
+            )
+        }
+    }
+
+    fun setPersianPrefabTargetGuid(guid: String) {
+        _state.update {
+            it.copy(
+                persianPrefabTargetGuid = guid,
+                persianPrefabPatchedFile = null,
+                persianPrefabPatchedCrc = null,
+                persianPrefabReport = null,
+            )
+        }
+    }
+
+    fun setPersianPrefabPptrFromFile(value: String) {
+        _state.update {
+            it.copy(
+                persianPrefabPptrFromFile = value,
+                persianPrefabPatchedFile = null,
+                persianPrefabPatchedCrc = null,
+                persianPrefabReport = null,
+            )
+        }
+    }
+
+    fun setPersianPrefabPptrFromPath(value: String) {
+        _state.update {
+            it.copy(
+                persianPrefabPptrFromPath = value,
+                persianPrefabPatchedFile = null,
+                persianPrefabPatchedCrc = null,
+                persianPrefabReport = null,
+            )
+        }
+    }
+
+    fun setPersianPrefabPptrToFile(value: String) {
+        _state.update {
+            it.copy(
+                persianPrefabPptrToFile = value,
+                persianPrefabPatchedFile = null,
+                persianPrefabPatchedCrc = null,
+                persianPrefabReport = null,
+            )
+        }
+    }
+
+    fun setPersianPrefabPptrToPath(value: String) {
+        _state.update {
+            it.copy(
+                persianPrefabPptrToPath = value,
+                persianPrefabPatchedFile = null,
+                persianPrefabPatchedCrc = null,
+                persianPrefabReport = null,
+            )
+        }
+    }
+
+    fun clearPersianPrefab() {
+        _state.update {
+            it.copy(
+                persianPrefabPatchedFile = null,
+                persianPrefabPatchedCrc = null,
+                persianPrefabReport = null,
+                message = getApplication<Application>().getString(R.string.unity_persian_prefab_cleared),
+            )
+        }
+    }
+
     fun clearPersianApply() {
         // Clears Apply results only, not terms: the user can re-run
         // preliminary checks or Apply again with the same terms.
@@ -2332,6 +2445,233 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                 tmpOut?.delete()
                 texOut?.delete()
                 sceneCacheDir?.deleteRecursively()
+            }
+        }
+    }
+
+    // Phase 5: repoint a standalone prefab serialized file from a
+    // static TMP font asset to the Persian dynamic fallback.
+    // Order matters and mirrors the VM proof (MainPrefabRepointTest):
+    // 1. GUID replacement is metadata-only (headerSize..dataOffset).
+    // 2. When a PPtr remap is given, the PPtr is first patched
+    //    inside its MonoBehaviour object and the file is rebuilt
+    //    (SerializedFileIndex.rebuild, which copies the ORIGINAL
+    //    metadata verbatim), and only THEN is the GUID replaced
+    //    on the rebuilt bytes -- doing GUID first would lose the
+    //    edit to the rebuild's verbatim metadata copy.
+    // 3. The final file is verified by re-parsing: same object
+    //    count and same per-object sizes (both edits are
+    //    size-preserving, so any size change means corruption).
+    // PPtr safety: matches are collected over EVERY MonoBehaviour
+    // object (classId 114) and exactly one in total is required.
+    // Zero matches (wrong reference) and multiple matches
+    // (ambiguous: repointing one would risk the wrong component)
+    // are blocked with clear messages, not guessed.
+    // This does NOT require persianMode or an open document: the
+    // prefab file is standalone. It also does NOT repack the file
+    // into a bundle (v1 limit, stated in the UI): the user
+    // exports the patched file and installs it like the Bendy
+    // prefabs (MT Manager), with size + CRC to verify.
+    fun repointPersianPrefab(resolver: ContentResolver) {
+        val startingState = _state.value
+        if (startingState.busy) return
+        val prefabUri = startingState.persianPrefabUri
+        if (prefabUri == null) {
+            _state.update { it.copy(message = getApplication<Application>().getString(R.string.unity_persian_prefab_no_file)) }
+            return
+        }
+        val sourceGuid = startingState.persianPrefabSourceGuid.trim()
+        val targetGuid = startingState.persianPrefabTargetGuid.trim()
+        if (sourceGuid.isEmpty() || targetGuid.isEmpty()) {
+            _state.update { it.copy(message = getApplication<Application>().getString(R.string.unity_persian_prefab_no_guids)) }
+            return
+        }
+        val pptrTexts = listOf(
+            startingState.persianPrefabPptrFromFile.trim(),
+            startingState.persianPrefabPptrFromPath.trim(),
+            startingState.persianPrefabPptrToFile.trim(),
+            startingState.persianPrefabPptrToPath.trim(),
+        )
+        val pptr: UnityPersianPrefabRepoint.PptrRepoint? = when {
+            pptrTexts.all { it.isEmpty() } -> null
+            pptrTexts.any { it.isEmpty() } -> {
+                _state.update { it.copy(message = getApplication<Application>().getString(R.string.unity_persian_prefab_pptr_incomplete)) }
+                return
+            }
+            else -> try {
+                UnityPersianPrefabRepoint.PptrRepoint(
+                    pptrTexts[0].toInt(),
+                    pptrTexts[1].toLong(),
+                    pptrTexts[2].toInt(),
+                    pptrTexts[3].toLong(),
+                )
+            } catch (_: NumberFormatException) {
+                _state.update { it.copy(message = getApplication<Application>().getString(R.string.unity_persian_prefab_pptr_bad_number)) }
+                return
+            }
+        }
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            var prefabTemp: File? = null
+            var prefabStaged: File? = null
+            var patchedObjectTemp: File? = null
+            var rebuiltTemp: File? = null
+            var rebuiltStaged: File? = null
+            var verifyTemp: File? = null
+            var verifyStaged: File? = null
+            var finalFile: File? = null
+            try {
+                runInterruptible(Dispatchers.IO) {
+                    val dir = File(getApplication<Application>().cacheDir, "persian-prefab").apply { mkdirs() }
+                    prefabTemp = copyUriToStageFile(resolver, prefabUri, dir, "persian-prefab-", ".bin")
+                    if (prefabTemp!!.length() > 64L * 1024 * 1024) {
+                        throw UnityFormatException("Prefab file is too large for v1 repoint (max 64 MB)")
+                    }
+                    prefabStaged = File(dir, "persian-prefab-data-${System.nanoTime()}.bin")
+                    val prefab = UnityBaseData.openBaseFile(prefabTemp!!, prefabStaged!!)
+                    val originalBytes = prefabTemp!!.readBytes()
+                    if (prefab.index.dataOffset > Int.MAX_VALUE) {
+                        throw UnityFormatException("Prefab data offset is too large for v1 repoint")
+                    }
+                    val dataOffset = prefab.index.dataOffset.toInt()
+                    val guidOffsets: List<Int>
+                    val pptrFileOffsets: List<Int>
+                    val workingBytes: ByteArray
+                    if (pptr == null) {
+                        val guidResult = UnityPersianPrefabRepoint.repointExternalGuid(
+                            originalBytes, prefab.index.headerSize, dataOffset, sourceGuid, targetGuid,
+                        )
+                        guidOffsets = guidResult.offsets
+                        pptrFileOffsets = emptyList()
+                        workingBytes = guidResult.bytes
+                    } else {
+                        var matchCount = 0
+                        var matchSlot: dev.cluvex.strata.core.unity.SerializedFileIndex.Slot? = null
+                        var matchOffset = -1
+                        var patchedObjectBytes: ByteArray? = null
+                        for (slot in prefab.index.slots) {
+                            if (slot.classId != 114) continue
+                            val raw = prefab.index.readObjectBytes(prefab.dataFile, slot)
+                            val found = UnityPersianPrefabRepoint.findPptrOccurrences(raw, pptr.fromFileId, pptr.fromPathId)
+                            for (offset in found) {
+                                matchCount++
+                                if (matchCount == 1) {
+                                    matchSlot = slot
+                                    matchOffset = offset
+                                    patchedObjectBytes = UnityPersianPrefabRepoint.repointPptr(raw, pptr).bytes
+                                }
+                            }
+                        }
+                        if (matchCount == 0) {
+                            _state.update {
+                                it.copy(
+                                    busy = false,
+                                    persianPrefabPatchedFile = null,
+                                    persianPrefabPatchedCrc = null,
+                                    persianPrefabReport = null,
+                                    message = getApplication<Application>().getString(R.string.unity_persian_prefab_pptr_not_found),
+                                )
+                            }
+                            return@runInterruptible
+                        }
+                        if (matchCount > 1) {
+                            _state.update {
+                                it.copy(
+                                    busy = false,
+                                    persianPrefabPatchedFile = null,
+                                    persianPrefabPatchedCrc = null,
+                                    persianPrefabReport = null,
+                                    message = getApplication<Application>().getString(R.string.unity_persian_prefab_pptr_ambiguous, matchCount),
+                                )
+                            }
+                            return@runInterruptible
+                        }
+                        patchedObjectTemp = File(dir, "persian-prefab-object-${System.nanoTime()}.bin")
+                        patchedObjectTemp!!.writeBytes(patchedObjectBytes!!)
+                        rebuiltTemp = File(dir, "persian-prefab-rebuilt-${System.nanoTime()}.bin")
+                        prefab.index.rebuild(
+                            rebuiltTemp!!, prefab.dataFile,
+                            mapOf(matchSlot!!.entryName to patchedObjectTemp!!), prefab.summary.entries,
+                        )
+                        val rebuiltBytes = rebuiltTemp!!.readBytes()
+                        rebuiltStaged = File(dir, "persian-prefab-rebuilt-data-${System.nanoTime()}.bin")
+                        val rebuilt = UnityBaseData.openBaseFile(rebuiltTemp!!, rebuiltStaged!!)
+                        if (rebuilt.index.dataOffset > Int.MAX_VALUE) {
+                            throw UnityFormatException("Rebuilt prefab data offset is too large for v1 repoint")
+                        }
+                        val rebuiltDataOffset = rebuilt.index.dataOffset.toInt()
+                        val guidResult = UnityPersianPrefabRepoint.repointExternalGuid(
+                            rebuiltBytes, rebuilt.index.headerSize, rebuiltDataOffset, sourceGuid, targetGuid,
+                        )
+                        guidOffsets = guidResult.offsets
+                        pptrFileOffsets = listOf(rebuiltDataOffset + matchSlot!!.start.toInt() + matchOffset)
+                        workingBytes = guidResult.bytes
+                    }
+                    verifyTemp = File(dir, "persian-prefab-final-${System.nanoTime()}.bin")
+                    verifyTemp!!.writeBytes(workingBytes)
+                    verifyStaged = File(dir, "persian-prefab-verify-data-${System.nanoTime()}.bin")
+                    val verified = UnityBaseData.openBaseFile(verifyTemp!!, verifyStaged!!)
+                    if (verified.summary.entries.size != prefab.summary.entries.size) {
+                        throw UnityFormatException("Repointed prefab object count changed (rebuild verification failed)")
+                    }
+                    verified.summary.entries.forEachIndexed { index, entry ->
+                        if (entry.size != prefab.summary.entries[index].size) {
+                            throw UnityFormatException("Repointed prefab object size changed (rebuild verification failed)")
+                        }
+                    }
+                    finalFile = verifyTemp
+                    verifyTemp = null
+                    val crcHex = CRC32().apply { update(workingBytes) }.value.toString(16).uppercase().padStart(8, '0')
+                    val report = getApplication<Application>().getString(
+                        R.string.unity_persian_prefab_report,
+                        guidOffsets.size,
+                        pptrFileOffsets.size,
+                        finalFile!!.name,
+                        finalFile!!.length(),
+                        crcHex,
+                    )
+                    _state.update {
+                        it.copy(
+                            busy = false,
+                            persianPrefabPatchedFile = finalFile,
+                            persianPrefabPatchedCrc = crcHex,
+                            persianPrefabReport = report,
+                            message = getApplication<Application>().getString(R.string.unity_persian_prefab_done),
+                        )
+                    }
+                }
+            } catch (e: CancellationException) {
+                finalFile?.delete()
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        persianPrefabPatchedFile = null,
+                        persianPrefabPatchedCrc = null,
+                        persianPrefabReport = null,
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                    )
+                }
+                throw e
+            } catch (e: Exception) {
+                finalFile?.delete()
+                finalFile = null
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        persianPrefabPatchedFile = null,
+                        persianPrefabPatchedCrc = null,
+                        persianPrefabReport = null,
+                        message = localizationFailureMessage(e),
+                    )
+                }
+            } finally {
+                prefabTemp?.delete()
+                prefabStaged?.delete()
+                patchedObjectTemp?.delete()
+                rebuiltTemp?.delete()
+                rebuiltStaged?.delete()
+                verifyTemp?.delete()
+                verifyStaged?.delete()
             }
         }
     }
