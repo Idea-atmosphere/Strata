@@ -25,4 +25,23 @@
     <string name="unity_localization_tsv_invalid">فایل TSV بومی‌سازی نامعتبر است</string>
     <string name="unity_localization_conflict">جدول بومی‌سازی پیش از اعمال تغییر کرده است</string>
     <string name="unity_localization_size_guard">رشد خروجی از حد ایمنی بومی‌سازی فراتر رفت</string>
+    <string name="unity_unified_title">همه‌ی جدول‌ها یک‌جا</string>
+    <string name="unity_unified_description">یک زبان را در همه‌ی جدول‌های بومی‌سازی ویرایش کن. ویرایش یک کلید مشترک در همه‌ی جدول‌هایی که آن کلید را دارند اعمال می‌شود؛ دکمه‌ی اعمال همه‌ی ویرایش‌ها را یک‌جا می‌نویسد.</string>
+    <string name="unity_unified_source_label">زبان مرجع</string>
+    <string name="unity_unified_target_label">زبان مقصد</string>
+    <string name="unity_unified_table_all">همه‌ی جدول‌ها</string>
+    <string name="unity_unified_search_label">جستجوی کلید یا متن</string>
+    <string name="unity_unified_only_edited">فقط ویرایش‌شده‌ها</string>
+    <string name="unity_unified_stats">%1$d جدول · %2$d عبارت · %3$d کلید یکتا · %4$d ویرایش‌شده</string>
+    <string name="unity_unified_shared_badge">در %1$d جدول</string>
+    <string name="unity_unified_edited_badge">ویرایش‌شده</string>
+    <string name="unity_unified_placeholder_badge">placeholder عوض شده — این عبارت رد می‌شود</string>
+    <string name="unity_unified_table_summary">%1$s: %2$d تغییر، %3$d رد شده (placeholder)، %4$d خالی رد شده</string>
+    <string name="unity_unified_apply">اعمال در همه‌ی جدول‌ها</string>
+    <string name="unity_unified_clear">پاک کردن ویرایش‌ها</string>
+    <string name="unity_unified_select_target">اول زبان مقصد را انتخاب کن</string>
+    <string name="unity_unified_nothing_to_apply">چیزی برای اعمال نیست</string>
+    <string name="unity_unified_applied">در %1$d جدول اعمال شد (%2$d عبارت)</string>
+    <string name="unity_unified_partial">%1$d جدول اعمال شد، %2$d جدول ناموفق بود</string>
+    <string name="unity_unified_plain_note">ویرایش‌ها همان‌طور که هستند نوشته می‌شوند. متن فارسی فقط با fallback بیک‌شده‌ی فارسی (بخش فارسی) در بازی دیده می‌شود.</string>
 </resources>

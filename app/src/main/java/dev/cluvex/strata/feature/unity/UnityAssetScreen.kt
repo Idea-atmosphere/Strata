@@ -63,8 +63,11 @@ import dev.cluvex.strata.R
 import dev.cluvex.strata.core.archive.ArchiveParent
 import dev.cluvex.strata.core.open.IncomingPaths
 import dev.cluvex.strata.core.unity.LocalizationAddLanguagePlan
+import dev.cluvex.strata.core.unity.LocalizationImportIssueKind
 import dev.cluvex.strata.core.unity.LocalizationImportPlan
 import dev.cluvex.strata.core.unity.LocalizationSource
+import dev.cluvex.strata.core.unity.UnifiedTablePlan
+import dev.cluvex.strata.core.unity.UnityUnifiedLocalization
 import dev.cluvex.strata.core.unity.UnityBundleDocument
 import dev.cluvex.strata.core.unity.UnityBundleEntry
 import dev.cluvex.strata.core.unity.UnityBundleRewriteEstimate
@@ -600,6 +603,45 @@ fun UnityAssetScreen(
                                         }
                                     }
                                 }
+                            }
+                        }
+                        item(key = "unified") {
+                            val allSources = state.localizationSources.values.flatten()
+                            // Default the source language to the first
+                            // language of the first table, like the
+                            // per-table flow does; the target stays
+                            // user-picked (no guessing which language
+                            // to edit).
+                            val firstCode = allSources.firstOrNull()?.languages?.firstOrNull()?.code
+                            LaunchedEffect(state.unifiedSourceCode, firstCode) {
+                                if (state.unifiedSourceCode == null && firstCode != null) {
+                                    vm.setUnifiedSourceLanguage(firstCode)
+                                }
+                            }
+                            if (allSources.isNotEmpty()) {
+                                val unifiedPlans = remember(
+                                    state.localizationSources, state.unifiedEdits,
+                                    state.unifiedSourceCode, state.unifiedTargetCode,
+                                    state.textTransformOptions,
+                                ) { vm.unifiedPlans() }
+                                val sharedCounts = remember(state.localizationSources) {
+                                    UnityUnifiedLocalization.sharedTableCounts(allSources)
+                                }
+                                UnifiedLocalizationActions(
+                                    busy = busy,
+                                    sourcesByEntry = state.localizationSources,
+                                    unifiedEdits = state.unifiedEdits,
+                                    unifiedSourceCode = state.unifiedSourceCode,
+                                    unifiedTargetCode = state.unifiedTargetCode,
+                                    plans = unifiedPlans,
+                                    sharedCounts = sharedCounts,
+                                    unifiedStatusText = state.unifiedStatusText,
+                                    onSelectSourceLanguage = vm::setUnifiedSourceLanguage,
+                                    onSelectTargetLanguage = vm::setUnifiedTargetLanguage,
+                                    onSetEdit = vm::setUnifiedEdit,
+                                    onClearEdits = vm::clearUnifiedEdits,
+                                    onApply = vm::applyUnifiedEdits,
+                                )
                             }
                         }
                         item(key = "persian") {
@@ -1472,6 +1514,278 @@ private fun PersianPrefabRepointActions(
 }
 
 @Composable
+private data class UnifiedRowItem(
+    val tableName: String,
+    val key: String,
+    val sourceValue: String,
+    val targetValue: String,
+    val isEdited: Boolean,
+    val sharedCount: Int,
+    val warned: Boolean,
+)
+
+// Unified multi-table editing: every discovered table on one page.
+// One edit map (term key -> new target value) is shared by all
+// tables, so a key present in several tables is edited in all of
+// them at once; Apply writes the edits into every affected table
+// (grouped by bundle entry, round-trip verified per entry) through
+// the same overlay mechanism as the per-table apply.
+@Composable
+private fun UnifiedLocalizationActions(
+    busy: Boolean,
+    sourcesByEntry: Map<String, List<LocalizationSource>>,
+    unifiedEdits: Map<String, String>,
+    unifiedSourceCode: String?,
+    unifiedTargetCode: String?,
+    plans: List<UnifiedTablePlan>,
+    sharedCounts: Map<String, Int>,
+    unifiedStatusText: String?,
+    onSelectSourceLanguage: (String) -> Unit,
+    onSelectTargetLanguage: (String) -> Unit,
+    onSetEdit: (String, String) -> Unit,
+    onClearEdits: () -> Unit,
+    onApply: () -> Unit,
+) {
+    var search by remember { mutableStateOf("") }
+    var tableFilter by remember { mutableStateOf<String?>(null) }
+    var onlyEdited by remember { mutableStateOf(false) }
+
+    val allSources = sourcesByEntry.values.flatten()
+    val allCodes = remember(allSources) {
+        val ordered = ArrayList<String>()
+        for (source in allSources) {
+            for (language in source.languages) {
+                if (language.code !in ordered) ordered += language.code
+            }
+        }
+        ordered
+    }
+    val tableNames = remember(allSources) { allSources.map { it.name }.distinct() }
+    val warnedKeys = remember(plans) {
+        plans.flatMap { it.plan.issues }
+            .filter { it.kind == LocalizationImportIssueKind.PLACEHOLDER_MISMATCH }
+            .mapNotNull { it.key }.toSet()
+    }
+    val rows = remember(
+        allSources, unifiedEdits, unifiedSourceCode, unifiedTargetCode,
+        search, tableFilter, onlyEdited,
+    ) {
+        val list = ArrayList<UnifiedRowItem>()
+        val query = search.trim()
+        for (source in allSources) {
+            if (tableFilter != null && source.name != tableFilter) continue
+            val sourceIndex = unifiedSourceCode?.let { source.languageIndex(it) } ?: -1
+            val targetIndex = unifiedTargetCode?.let { source.languageIndex(it) } ?: -1
+            for (term in source.terms) {
+                val originalTarget = if (targetIndex >= 0) term.values.getOrNull(targetIndex) ?: "" else ""
+                val targetValue = unifiedEdits[term.key] ?: originalTarget
+                val isEdited = term.key in unifiedEdits && unifiedEdits[term.key] != originalTarget
+                if (onlyEdited && !isEdited) continue
+                val sourceValue = if (sourceIndex >= 0) term.values.getOrNull(sourceIndex) ?: "" else ""
+                if (query.isNotEmpty() &&
+                    !term.key.contains(query, ignoreCase = true) &&
+                    !sourceValue.contains(query, ignoreCase = true) &&
+                    !targetValue.contains(query, ignoreCase = true)
+                ) continue
+                list += UnifiedRowItem(
+                    tableName = source.name,
+                    key = term.key,
+                    sourceValue = sourceValue,
+                    targetValue = targetValue,
+                    isEdited = isEdited,
+                    sharedCount = sharedCounts[term.key] ?: 1,
+                    warned = term.key in warnedKeys,
+                )
+            }
+        }
+        list
+    }
+    val distinctKeys = remember(allSources) {
+        allSources.flatMap { it.terms }.map { it.key }.toSet().size
+    }
+
+    Surface(
+        shape = RoundedCornerShape(20.dp),
+        color = MaterialTheme.colorScheme.surfaceContainer,
+        modifier = Modifier.fillMaxWidth().padding(top = 8.dp),
+    ) {
+        Column(Modifier.padding(12.dp), verticalArrangement = Arrangement.spacedBy(5.dp)) {
+            Text(stringResource(R.string.unity_unified_title), style = MaterialTheme.typography.titleSmall)
+            Text(
+                stringResource(R.string.unity_unified_description),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Text(stringResource(R.string.unity_unified_source_label), style = MaterialTheme.typography.labelMedium)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                items(allCodes, key = { "src:$it" }) { code ->
+                    if (code == unifiedSourceCode) {
+                        Button(onClick = { onSelectSourceLanguage(code) }, enabled = !busy) { Text(code, maxLines = 1) }
+                    } else {
+                        OutlinedButton(onClick = { onSelectSourceLanguage(code) }, enabled = !busy) { Text(code, maxLines = 1) }
+                    }
+                }
+            }
+            Text(stringResource(R.string.unity_unified_target_label), style = MaterialTheme.typography.labelMedium)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                items(allCodes, key = { "tgt:$it" }) { code ->
+                    if (code == unifiedTargetCode) {
+                        Button(onClick = { onSelectTargetLanguage(code) }, enabled = !busy) { Text(code, maxLines = 1) }
+                    } else {
+                        OutlinedButton(onClick = { onSelectTargetLanguage(code) }, enabled = !busy) { Text(code, maxLines = 1) }
+                    }
+                }
+            }
+            OutlinedTextField(
+                value = search,
+                onValueChange = { search = it },
+                label = { Text(stringResource(R.string.unity_unified_search_label)) },
+                modifier = Modifier.fillMaxWidth(),
+                singleLine = true,
+            )
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                item {
+                    if (tableFilter == null) {
+                        Button(onClick = { tableFilter = null }, enabled = !busy) {
+                            Text(stringResource(R.string.unity_unified_table_all), maxLines = 1)
+                        }
+                    } else {
+                        OutlinedButton(onClick = { tableFilter = null }, enabled = !busy) {
+                            Text(stringResource(R.string.unity_unified_table_all), maxLines = 1)
+                        }
+                    }
+                }
+                items(tableNames, key = { "table:$it" }) { name ->
+                    if (name == tableFilter) {
+                        Button(onClick = { tableFilter = name }, enabled = !busy) { Text(name, maxLines = 1) }
+                    } else {
+                        OutlinedButton(onClick = { tableFilter = name }, enabled = !busy) { Text(name, maxLines = 1) }
+                    }
+                }
+            }
+            Row(
+                verticalAlignment = Alignment.CenterVertically,
+                modifier = Modifier.fillMaxWidth().clickable { onlyEdited = !onlyEdited },
+            ) {
+                Checkbox(checked = onlyEdited, onCheckedChange = { onlyEdited = it }, enabled = !busy)
+                Text(stringResource(R.string.unity_unified_only_edited), style = MaterialTheme.typography.bodySmall)
+            }
+            Text(
+                stringResource(
+                    R.string.unity_unified_stats,
+                    allSources.size,
+                    allSources.sumOf { it.terms.size },
+                    distinctKeys,
+                    unifiedEdits.size,
+                ),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            // Fixed height is REQUIRED: a LazyColumn inside a
+            // non-scrollable Column needs bounded height, otherwise
+            // it measures with infinite height (or overflows the
+            // screen). 480 dp shows a handful of terms and scrolls
+            // for the rest, without composing all terms at once.
+            LazyColumn(
+                modifier = Modifier.fillMaxWidth().height(480.dp).padding(top = 4.dp),
+                verticalArrangement = Arrangement.spacedBy(4.dp),
+            ) {
+                items(rows, key = { "${it.tableName}:${it.key}" }) { row ->
+                    Column(verticalArrangement = Arrangement.spacedBy(2.dp)) {
+                        Row(horizontalArrangement = Arrangement.spacedBy(6.dp)) {
+                            Text(
+                                row.tableName,
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                maxLines = 1,
+                            )
+                            if (row.sharedCount > 1) {
+                                Text(
+                                    stringResource(R.string.unity_unified_shared_badge, row.sharedCount),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.primary,
+                                )
+                            }
+                            if (row.isEdited) {
+                                Text(
+                                    stringResource(R.string.unity_unified_edited_badge),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.tertiary,
+                                )
+                            }
+                            if (row.warned) {
+                                Text(
+                                    stringResource(R.string.unity_unified_placeholder_badge),
+                                    style = MaterialTheme.typography.labelSmall,
+                                    color = MaterialTheme.colorScheme.error,
+                                )
+                            }
+                        }
+                        OutlinedTextField(
+                            value = row.targetValue,
+                            onValueChange = { onSetEdit(row.key, it) },
+                            label = { Text(row.key, maxLines = 1) },
+                            supportingText = if (unifiedSourceCode != null) {
+                                {
+                                    Text(
+                                        row.sourceValue,
+                                        maxLines = 2,
+                                        overflow = TextOverflow.Ellipsis,
+                                    )
+                                }
+                            } else {
+                                null
+                            },
+                            modifier = Modifier.fillMaxWidth(),
+                            enabled = !busy && unifiedTargetCode != null,
+                            singleLine = false,
+                        )
+                    }
+                }
+            }
+            for (plan in plans) {
+                Text(
+                    stringResource(
+                        R.string.unity_unified_table_summary,
+                        plan.source.name,
+                        plan.plan.changes.size,
+                        plan.plan.placeholderFailureCount,
+                        plan.plan.emptyCellCount,
+                    ),
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                )
+            }
+            if (unifiedStatusText != null) {
+                Text(
+                    unifiedStatusText,
+                    style = MaterialTheme.typography.bodySmall,
+                    color = MaterialTheme.colorScheme.primary,
+                )
+            }
+            Row(horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                Button(
+                    onClick = onApply,
+                    enabled = !busy && plans.any { it.plan.canApply },
+                ) {
+                    Text(stringResource(R.string.unity_unified_apply))
+                }
+                OutlinedButton(
+                    onClick = onClearEdits,
+                    enabled = !busy && unifiedEdits.isNotEmpty(),
+                ) {
+                    Text(stringResource(R.string.unity_unified_clear))
+                }
+            }
+            Text(
+                stringResource(R.string.unity_unified_plain_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+        }
+    }
+}
+
 private fun LocalizationActions(
     busy: Boolean,
     sources: List<LocalizationSource>,

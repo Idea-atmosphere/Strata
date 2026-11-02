@@ -46,7 +46,9 @@ import dev.cluvex.strata.core.unity.UnityLocalizationScanProgress
 import dev.cluvex.strata.core.unity.UnityLocalizationScanReport
 import dev.cluvex.strata.core.unity.UnityLocalizationScanRequest
 import dev.cluvex.strata.core.unity.UnityLocalizationOperations
+import dev.cluvex.strata.core.unity.UnifiedTablePlan
 import dev.cluvex.strata.core.unity.UnityLocalizationTsv
+import dev.cluvex.strata.core.unity.UnityUnifiedLocalization
 import dev.cluvex.strata.core.unity.UVal
 import dev.cluvex.strata.core.unity.UnityBaseData
 import dev.cluvex.strata.core.unity.UnityPersianApplyPipeline
@@ -223,6 +225,18 @@ data class UnityAssetUiState(
     val persianPrefabPatchedFile: File? = null,
     val persianPrefabPatchedCrc: String? = null,
     val persianPrefabReport: String? = null,
+    // Unified multi-table editing: one edit map (term key -> new
+    // target value) shared by every discovered table. A key present
+    // in several tables is edited in all of them at once; Apply
+    // writes the edits into every affected table (grouped by
+    // bundle entry, round-trip verified per entry) via the same
+    // overlay mechanism as the per-table apply. Values are written
+    // as-is: no shaping, no PUA mapping, no font baking here (that
+    // stays with the Persian Apply pipeline).
+    val unifiedEdits: Map<String, String> = emptyMap(),
+    val unifiedSourceCode: String? = null,
+    val unifiedTargetCode: String? = null,
+    val unifiedStatusText: String? = null,
 ) {
     val outputNeedsSigning: Boolean
         get() = outputSigningHandoff == UnityApkSigningHandoffState.SIGNING_REQUIRED
@@ -1427,6 +1441,181 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                         message = localizationFailureMessage(e),
                     )
                 }
+            }
+        }
+    }
+
+    // ---- Unified multi-table editing ----
+
+    fun setUnifiedSourceLanguage(code: String) {
+        val known = _state.value.localizationSources.values.flatten()
+            .any { it.languageIndex(code) >= 0 }
+        if (!known) return
+        _state.update { it.copy(unifiedSourceCode = code) }
+    }
+
+    fun setUnifiedTargetLanguage(code: String) {
+        val known = _state.value.localizationSources.values.flatten()
+            .any { it.languageIndex(code) >= 0 }
+        if (!known) return
+        _state.update { it.copy(unifiedTargetCode = code) }
+    }
+
+    fun setUnifiedEdit(key: String, value: String) {
+        _state.update { it.copy(unifiedEdits = it.unifiedEdits + (key to value)) }
+    }
+
+    fun clearUnifiedEdits() {
+        _state.update { it.copy(unifiedEdits = emptyMap(), unifiedStatusText = null) }
+    }
+
+    /** Pure computation, no IO: one import plan per affected table. */
+    fun unifiedPlans(): List<UnifiedTablePlan> {
+        val state = _state.value
+        val target = state.unifiedTargetCode ?: return emptyList()
+        return UnityUnifiedLocalization.buildPlans(
+            sourcesByEntry = state.localizationSources,
+            edits = state.unifiedEdits,
+            targetCode = target,
+            sourceCode = state.unifiedSourceCode,
+            options = state.textTransformOptions,
+        )
+    }
+
+    /**
+     * Writes the unified edits into every affected table, grouped by
+     * bundle entry (one staged replacement per entry, round-trip
+     * verified per entry, like [applyLocalizationPlan]). Edits whose
+     * key is fully applied everywhere are dropped; edits still
+     * differing from the staged values (failed entries, placeholder
+     * skips) are kept so the user can retry them.
+     */
+    fun applyUnifiedEdits() {
+        val doc = document ?: return
+        val dir = stageDir ?: return
+        val state = _state.value
+        if (state.busy) return
+        val target = state.unifiedTargetCode
+        if (target == null) {
+            _state.update {
+                it.copy(message = getApplication<Application>().getString(R.string.unity_unified_select_target))
+            }
+            return
+        }
+        if (state.unifiedEdits.isEmpty()) {
+            _state.update {
+                it.copy(message = getApplication<Application>().getString(R.string.unity_unified_nothing_to_apply))
+            }
+            return
+        }
+        // Same guard as plain apply: a staged Persian I2 must not be
+        // overwritten with plain values (they would render as
+        // squares against the Persian base).
+        if (state.persianApplied) {
+            _state.update {
+                it.copy(message = getApplication<Application>().getString(R.string.unity_persian_plain_apply_blocked))
+            }
+            return
+        }
+        val plans = UnityUnifiedLocalization.buildPlans(
+            sourcesByEntry = state.localizationSources,
+            edits = state.unifiedEdits,
+            targetCode = target,
+            sourceCode = state.unifiedSourceCode,
+            options = state.textTransformOptions,
+        ).filter { it.plan.canApply }
+        if (plans.isEmpty()) {
+            _state.update {
+                it.copy(message = getApplication<Application>().getString(R.string.unity_unified_nothing_to_apply))
+            }
+            return
+        }
+        val plansByEntry = plans.groupBy { it.entryName }
+        _state.update {
+            it.copy(
+                busy = true,
+                message = null,
+                localizationRoundTripStatus = UnityLocalizationRoundTripStatus.RUNNING,
+                localizationRoundTripDetail = null,
+            )
+        }
+        viewModelScope.launch {
+            val successes = LinkedHashMap<String, Pair<File, List<LocalizationSource>>>()
+            val failures = ArrayList<Pair<String, Throwable>>()
+            for ((entryName, entryPlans) in plansByEntry) {
+                val entry = doc.summary.entries.firstOrNull { it.name == entryName }
+                if (entry == null) {
+                    failures += entryName to UnityFormatException("Bundle entry was not found: $entryName")
+                    continue
+                }
+                val tables = state.localizationSources[entryName].orEmpty()
+                val updatedById = entryPlans.associate { it.source.origin.tableId to it.plan.updated!! }
+                val rewritten = tables.map { table -> updatedById[table.origin.tableId] ?: table }
+                val staged = File(
+                    dir,
+                    "localization-${entry.name.hashCode().toUInt().toString(16)}-${System.nanoTime()}.bin",
+                )
+                try {
+                    runInterruptible(Dispatchers.IO) {
+                        val existingEntryReplacement = state.replacements[entry.name]
+                        if (existingEntryReplacement != null) {
+                            UnityLocalizationOverlay.write(existingEntryReplacement, rewritten, staged, dir)
+                        } else {
+                            doc.writeLocalizationReplacement(entry, rewritten, staged)
+                        }
+                        verifyLocalizationRoundTrip(staged, rewritten, dir)
+                    }
+                    successes[entryName] = staged to rewritten
+                } catch (e: CancellationException) {
+                    staged.delete()
+                    successes.values.forEach { it.first.delete() }
+                    throw e
+                } catch (e: Exception) {
+                    staged.delete()
+                    failures += entryName to e
+                }
+            }
+            // New sources map from the snapshot plus successful entries.
+            val newSources = state.localizationSources.toMutableMap()
+            for ((entryName, pair) in successes) newSources[entryName] = pair.second
+            // Keep only edits not fully applied everywhere.
+            val targetIndexOf: (LocalizationSource) -> Int = { it.languageIndex(target) }
+            val keptEdits = state.unifiedEdits.filter { (key, value) ->
+                newSources.values.flatten().any { source ->
+                    val term = source.terms.firstOrNull { it.key == key }
+                    val index = targetIndexOf(source)
+                    term != null && index >= 0 && term.values.getOrNull(index) != value
+                }
+            }
+            val appliedTerms = plans.filter { it.entryName in successes }.sumOf { it.plan.changes.size }
+            val app = getApplication<Application>()
+            val message = if (failures.isEmpty()) {
+                app.getString(R.string.unity_unified_applied, successes.size, appliedTerms)
+            } else {
+                localizationFailureMessage(failures.first().second)
+            }
+            _state.update {
+                withTranslationDerived(
+                    it.copy(
+                        busy = false,
+                        replacements = it.replacements + successes.mapValues { entry -> entry.value.first },
+                        localizationReplacementEntries = it.localizationReplacementEntries + successes.keys,
+                        localizationSources = it.localizationSources + newSources.filterKeys { name -> name in successes },
+                        unifiedEdits = keptEdits,
+                        localizationRoundTripStatus = if (failures.isEmpty()) {
+                            UnityLocalizationRoundTripStatus.PASSED
+                        } else {
+                            UnityLocalizationRoundTripStatus.FAILED
+                        },
+                        localizationRoundTripDetail = failures.firstOrNull()?.second?.message,
+                        unifiedStatusText = if (failures.isEmpty()) {
+                            app.getString(R.string.unity_unified_applied, successes.size, appliedTerms)
+                        } else {
+                            app.getString(R.string.unity_unified_partial, successes.size, failures.size)
+                        },
+                        message = message,
+                    ),
+                )
             }
         }
     }

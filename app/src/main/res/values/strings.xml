@@ -93,4 +93,23 @@
     <string name="unity_persian_prefab_clear">Clear prefab repoint</string>
     <string name="unity_persian_prefab_cleared">Prefab repoint cleared.</string>
     <string name="unity_persian_prefab_export_done">Patched prefab exported: %1$s</string>
+    <string name="unity_unified_title">All tables at once</string>
+    <string name="unity_unified_description">Edit one language across every localization table. One edit to a shared key updates every table that has it; Apply writes all edits at once.</string>
+    <string name="unity_unified_source_label">Source language</string>
+    <string name="unity_unified_target_label">Target language</string>
+    <string name="unity_unified_table_all">All tables</string>
+    <string name="unity_unified_search_label">Search keys or text</string>
+    <string name="unity_unified_only_edited">Edited only</string>
+    <string name="unity_unified_stats">%1$d tables · %2$d terms · %3$d distinct keys · %4$d edited</string>
+    <string name="unity_unified_shared_badge">In %1$d tables</string>
+    <string name="unity_unified_edited_badge">Edited</string>
+    <string name="unity_unified_placeholder_badge">Placeholders changed — term will be skipped</string>
+    <string name="unity_unified_table_summary">%1$s: %2$d changes, %3$d placeholder-skipped, %4$d empty-skipped</string>
+    <string name="unity_unified_apply">Apply to all tables</string>
+    <string name="unity_unified_clear">Clear edits</string>
+    <string name="unity_unified_select_target">Select a target language first</string>
+    <string name="unity_unified_nothing_to_apply">Nothing to apply</string>
+    <string name="unity_unified_applied">Applied to %1$d tables (%2$d terms)</string>
+    <string name="unity_unified_partial">%1$d tables applied, %2$d tables failed</string>
+    <string name="unity_unified_plain_note">Edits are written as-is. Persian text renders only with a baked Persian fallback (Persian section).</string>
 </resources>
