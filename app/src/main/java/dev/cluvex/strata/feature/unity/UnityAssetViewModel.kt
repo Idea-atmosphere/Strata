@@ -37,6 +37,7 @@ import dev.cluvex.strata.core.unity.UnityLocalizationCandidateResult
 import dev.cluvex.strata.core.unity.UnityLocalizationDirectoryDiscovery
 import dev.cluvex.strata.core.unity.UnityLocalizationDiscovery
 import dev.cluvex.strata.core.unity.UnityLocalizationInspection
+import dev.cluvex.strata.core.unity.UnityLocalizationJson
 import dev.cluvex.strata.core.unity.UnityLocalizationOpenRequest
 import dev.cluvex.strata.core.unity.UnityLocalizationOverlay
 import dev.cluvex.strata.core.unity.UnityLocalizationRoundTripStatus
@@ -1161,7 +1162,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                     }
                     staged = file
                     try {
-                        file to UnityLocalizationTsv.planImport(
+                        file to planImportFromText(
                             source,
                             readLocalizationTsvUtf8(file),
                             options,
@@ -1290,7 +1291,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         viewModelScope.launch {
             try {
                 val plan = runInterruptible(Dispatchers.IO) {
-                    UnityLocalizationTsv.planImport(
+                    planImportFromText(
                         source,
                         readLocalizationTsvUtf8(file),
                         options,
@@ -1504,15 +1505,42 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         }
     }
 
+    /**
+     * Plans an import from picked text. A document starting with '{'
+     * is a flat I2 JSON file (see [UnityLocalizationJson]) and is
+     * converted to TSV first, so JSON and TSV share the same
+     * validation in [UnityLocalizationTsv.planImport]. The staged
+     * file keeps the original picked content, so re-planning a JSON
+     * import converts it again instead of failing on the JSON text.
+     */
+    private fun planImportFromText(
+        source: LocalizationSource,
+        text: String,
+        options: UnityTextTransformOptions,
+        sourceCode: String?,
+    ): LocalizationImportPlan {
+        val tsv = if (text.trimStart().startsWith("{")) {
+            UnityLocalizationJson.toTsv(source, text)
+        } else {
+            text
+        }
+        return UnityLocalizationTsv.planImport(source, tsv, options, sourceCode)
+    }
+
     private fun localizationFailureMessage(error: Throwable): String {
         if (error is VirtualMachineError && error !is OutOfMemoryError) throw error
         if (error is ThreadDeath) throw error
-        val detail = error.message?.takeIf { it.isNotBlank() }
+        // Include the exception type: a bare message can be a bare
+        // class name (as with a class-load failure), which alone
+        // does not identify what actually failed.
+        val typeName = error::class.simpleName
+            ?: error::class.qualifiedName?.substringAfterLast('.')
+            ?: "Error"
+        val detail = error.message?.takeIf { it.isNotBlank() }?.let { "$typeName: $it" } ?: typeName
         return when {
             error is UnityDocumentClosedException -> getApplication<Application>().getString(R.string.unity_staging_unavailable)
             error is UnityOperationCancelledException -> getApplication<Application>().getString(R.string.unity_operation_cancelled)
-            detail != null -> getApplication<Application>().getString(R.string.unity_operation_failed_detail, detail)
-            else -> getApplication<Application>().getString(R.string.unity_operation_failed)
+            else -> getApplication<Application>().getString(R.string.unity_operation_failed_detail, detail)
         }
     }
 

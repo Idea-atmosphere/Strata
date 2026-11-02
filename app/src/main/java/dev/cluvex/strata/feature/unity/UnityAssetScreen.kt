@@ -586,7 +586,7 @@ fun UnityAssetScreen(
                                                 },
                                                 onImportTsv = {
                                                     try {
-                                                        tsvImportPicker.launch(arrayOf("text/*", "application/octet-stream"))
+                                                        tsvImportPicker.launch(arrayOf("text/*", "application/json", "application/octet-stream"))
                                                     } catch (_: ActivityNotFoundException) {
                                                         vm.notifyMessage(context.getString(R.string.unity_operation_failed))
                                                     } catch (_: SecurityException) {
