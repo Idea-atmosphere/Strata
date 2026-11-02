@@ -1513,7 +1513,6 @@ private fun PersianPrefabRepointActions(
     }
 }
 
-@Composable
 private data class UnifiedRowItem(
     val tableName: String,
     val key: String,
@@ -1786,6 +1785,7 @@ private fun UnifiedLocalizationActions(
     }
 }
 
+@Composable
 private fun LocalizationActions(
     busy: Boolean,
     sources: List<LocalizationSource>,
