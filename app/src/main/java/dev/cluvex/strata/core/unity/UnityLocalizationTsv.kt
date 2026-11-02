@@ -57,7 +57,39 @@ data class LocalizationImportPlan(
 object UnityLocalizationTsv {
     private const val METADATA_MARKER = "#@strata-localization"
     private const val FORMAT_VERSION = 1
-    private val DIRECTIVE = Regex("\\{[^{}\\r\\n]+}")
+
+    /**
+     * Finds every `{directive}` in [text]: a '{' followed by one or
+     * more characters that are not '{', '}', CR or LF, followed by
+     * '}'. This is a hand-written scanner for exactly that shape, so
+     * the object keeps no runtime-initialized state beyond constants;
+     * its ranges match Regex `\{[^{}\r\n]+\}` findAll, left to right,
+     * non-overlapping, advancing one character past a failed '{'.
+     */
+    private fun findDirectives(text: String): List<IntRange> {
+        val ranges = ArrayList<IntRange>()
+        var index = 0
+        while (index < text.length) {
+            if (text[index] != '{') {
+                index++
+                continue
+            }
+            var end = index + 1
+            while (end < text.length &&
+                text[end] != '{' && text[end] != '}' &&
+                text[end] != '\r' && text[end] != '\n'
+            ) {
+                end++
+            }
+            if (end > index + 1 && end < text.length && text[end] == '}') {
+                ranges += index..end
+                index = end + 1
+            } else {
+                index++
+            }
+        }
+        return ranges
+    }
 
     fun exportAll(
         source: LocalizationSource,
@@ -305,7 +337,8 @@ object UnityLocalizationTsv {
         )
     }
 
-    private fun directives(value: String): List<String> = DIRECTIVE.findAll(value).map { it.value }.toList()
+    private fun directives(value: String): List<String> =
+        findDirectives(value).map { value.substring(it) }
 
     private fun sameDirectiveMultiset(left: List<String>, right: List<String>): Boolean =
         left.groupingBy { it }.eachCount() == right.groupingBy { it }.eachCount()
@@ -319,10 +352,10 @@ object UnityLocalizationTsv {
         if (!options.isEnabled) return text
         val output = StringBuilder(text.length)
         var cursor = 0
-        DIRECTIVE.findAll(text).forEach { match ->
-            output.append(UnityTextShaper.transform(text.substring(cursor, match.range.first), options))
-            output.append(match.value)
-            cursor = match.range.last + 1
+        findDirectives(text).forEach { range ->
+            output.append(UnityTextShaper.transform(text.substring(cursor, range.first), options))
+            output.append(text.substring(range))
+            cursor = range.last + 1
         }
         output.append(UnityTextShaper.transform(text.substring(cursor), options))
         return output.toString()
