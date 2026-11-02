@@ -46,12 +46,28 @@ object UnityLocalizationJson {
     /**
      * Parses a file holding one or more flat-I2 JSON objects (the
      * shape [toJsonAll] writes: objects separated by whitespace, a
-     * blank line in practice). A leading BOM is tolerated. Throws
-     * [IllegalArgumentException] on malformed input or a
-     * non-object value.
+     * blank line in practice). A leading BOM is tolerated. AI
+     * replies are tolerated too: a surrounding Markdown code
+     * fence is stripped, and a top-level array of objects is
+     * accepted as well. Throws [IllegalArgumentException] on
+     * malformed input or a non-object value.
      */
     fun parseAll(text: String): List<JsonValue.Obj> {
-        val parser = Parser(text.removePrefix("\uFEFF"))
+        var cleaned = text.removePrefix("\uFEFF").trim()
+        if (cleaned.startsWith("```")) {
+            cleaned = cleaned.removePrefix("```").removePrefix("json").removePrefix("JSON")
+                .trimStart('\n', '\r')
+            if (cleaned.endsWith("```")) cleaned = cleaned.removeSuffix("```").trimEnd()
+        }
+        if (cleaned.startsWith("[")) {
+            val top = Parser(cleaned).parseDocument()
+            if (top !is JsonValue.Arr) throw IllegalArgumentException("Invalid localization JSON: expected an array of objects")
+            if (top.items.any { it !is JsonValue.Obj }) {
+                throw IllegalArgumentException("Invalid localization JSON: array items must be objects")
+            }
+            return top.items.filterIsInstance<JsonValue.Obj>()
+        }
+        val parser = Parser(cleaned)
         return parser.parseDocuments()
     }
 
