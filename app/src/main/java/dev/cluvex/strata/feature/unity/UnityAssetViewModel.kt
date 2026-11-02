@@ -127,6 +127,24 @@ internal fun consumeUnityTsvExportRequest(
     consumedId: Long,
 ): UnityTsvExportRequest? = current?.takeUnless { it.id == consumedId }
 
+/** One-shot request to save a generated all-tables JSON through Android's document provider. */
+data class UnityJsonExportRequest(
+    val id: Long,
+    val suggestedName: String,
+) {
+    init {
+        require(id > 0L) { "Unity JSON export request id must be positive" }
+        require(suggestedName.endsWith(".json", ignoreCase = true)) {
+            "Unity JSON export name must use the .json extension"
+        }
+    }
+}
+
+internal fun consumeUnityJsonExportRequest(
+    current: UnityJsonExportRequest?,
+    consumedId: Long,
+): UnityJsonExportRequest? = current?.takeUnless { it.id == consumedId }
+
 data class UnityAssetUiState(
     val path: String = "",
     val loading: Boolean = true,
@@ -167,6 +185,8 @@ data class UnityAssetUiState(
     val exportedTexts: Map<String, File> = emptyMap(),
     val editorRequest: UnityEditorRequest? = null,
     val tsvExportRequest: UnityTsvExportRequest? = null,
+    val unifiedJsonFile: File? = null,
+    val jsonExportRequest: UnityJsonExportRequest? = null,
     val output: File? = null,
     val outputSigningHandoff: UnityApkSigningHandoffState = UnityApkSigningHandoffState.NOT_APK,
     val message: String? = null,
@@ -1140,6 +1160,119 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                         busy = false,
                         message = getApplication<Application>().getString(
                             R.string.unity_localization_exported,
+                            uri.lastPathSegment ?: uri.toString(),
+                        ),
+                    )
+                }
+            } catch (error: CancellationException) {
+                discardCreatedDocument(resolver, uri)
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                    )
+                }
+                throw error
+            } catch (error: Throwable) {
+                discardCreatedDocument(resolver, uri)
+                _state.update { it.copy(busy = false, message = localizationFailureMessage(error)) }
+            }
+        }
+    }
+
+    /**
+     * Stages every discovered table as one JSON text (same flat
+     * shape the JSON import accepts, one object per table) and
+     * requests a save through Android's document provider. This
+     * replaces the earlier clipboard copy: copying the whole text
+     * crashed on device (large clipboard payload), while a file
+     * save has no such limit.
+     */
+    fun exportUnifiedJson() {
+        val dir = stageDir ?: return
+        val sources = _state.value.localizationSources
+        if (sources.isEmpty()) return
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            try {
+                val text = UnityLocalizationJson.toJsonAll(sources)
+                val output = runInterruptible(Dispatchers.IO) {
+                    File(dir, "i2-tables-${System.nanoTime()}.json").apply { writeText(text) }
+                }
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        unifiedJsonFile = output,
+                        jsonExportRequest = newJsonExportRequest(output),
+                    )
+                }
+            } catch (e: CancellationException) {
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                    )
+                }
+                throw e
+            } catch (error: Throwable) {
+                _state.update { it.copy(busy = false, message = localizationFailureMessage(error)) }
+            }
+        }
+    }
+
+    /** Copies the staged all-tables JSON to a user-selected document; mirrors saveLocalizationTsv. */
+    fun saveUnifiedJson(uri: Uri, resolver: ContentResolver) {
+        val sourceFile = _state.value.unifiedJsonFile?.takeIf { it.isFile } ?: return
+        if (_state.value.busy) return
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            try {
+                runInterruptible(Dispatchers.IO) {
+                    val sourceDigest = MessageDigest.getInstance("SHA-256")
+                    val target = resolver.openOutputStream(uri, "rwt")
+                        ?: throw IOException("JSON export destination is unavailable")
+                    val copied = target.use { output ->
+                        DigestInputStream(sourceFile.inputStream().buffered(), sourceDigest).use { input ->
+                            val buffer = ByteArray(64 * 1024)
+                            var total = 0L
+                            while (true) {
+                                ensureUnityOperationActive()
+                                val read = input.read(buffer)
+                                if (read < 0) break
+                                if (read == 0) continue
+                                output.write(buffer, 0, read)
+                                total += read
+                            }
+                            total
+                        }
+                    }
+                    if (copied != sourceFile.length()) {
+                        throw IOException("JSON export destination received an incomplete copy")
+                    }
+                    val destinationDigest = MessageDigest.getInstance("SHA-256")
+                    val destination = resolver.openInputStream(uri)
+                        ?: throw IOException("JSON export destination cannot be verified")
+                    val verifiedBytes = DigestInputStream(destination.buffered(), destinationDigest).use { input ->
+                        val buffer = ByteArray(64 * 1024)
+                        var total = 0L
+                        while (true) {
+                            ensureUnityOperationActive()
+                            val read = input.read(buffer)
+                            if (read < 0) break
+                            if (read > 0) total += read
+                        }
+                        total
+                    }
+                    if (verifiedBytes != copied || !sourceDigest.digest().contentEquals(destinationDigest.digest())) {
+                        throw IOException("JSON export destination failed read-after-write verification")
+                    }
+                }
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        message = getApplication<Application>().getString(
+                            R.string.unity_unified_json_exported,
                             uri.lastPathSegment ?: uri.toString(),
                         ),
                     )
@@ -2146,6 +2279,18 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { current ->
             val remaining = consumeUnityTsvExportRequest(current.tsvExportRequest, id)
             if (remaining === current.tsvExportRequest) current else current.copy(tsvExportRequest = remaining)
+        }
+    }
+
+    private fun newJsonExportRequest(file: File): UnityJsonExportRequest {
+        if (!file.isFile || !file.canRead()) throw IOException("Generated JSON draft is unavailable")
+        return UnityJsonExportRequest(nextDraftRequestId(), file.name)
+    }
+
+    fun consumeJsonExportRequest(id: Long) {
+        _state.update { current ->
+            val remaining = consumeUnityJsonExportRequest(current.jsonExportRequest, id)
+            if (remaining === current.jsonExportRequest) current else current.copy(jsonExportRequest = remaining)
         }
     }
 

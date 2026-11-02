@@ -1,9 +1,6 @@
 package dev.cluvex.strata.feature.unity
 
 import android.content.ActivityNotFoundException
-import android.content.ClipData
-import android.content.ClipboardManager
-import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
@@ -70,7 +67,6 @@ import dev.cluvex.strata.core.unity.LocalizationImportIssueKind
 import dev.cluvex.strata.core.unity.LocalizationImportPlan
 import dev.cluvex.strata.core.unity.LocalizationSource
 import dev.cluvex.strata.core.unity.UnifiedTablePlan
-import dev.cluvex.strata.core.unity.UnityLocalizationJson
 import dev.cluvex.strata.core.unity.UnityUnifiedLocalization
 import dev.cluvex.strata.core.unity.UnityBundleDocument
 import dev.cluvex.strata.core.unity.UnityBundleEntry
@@ -92,7 +88,6 @@ import dev.cluvex.strata.core.util.Formatters
 import dev.cluvex.strata.ui.isolated
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
@@ -243,6 +238,28 @@ fun UnityAssetScreen(
             vm.consumeTsvExportRequest(request.id)
             try {
                 tsvSavePicker.launch(request.suggestedName)
+            } catch (_: ActivityNotFoundException) {
+                vm.notifyMessage(context.getString(R.string.unity_operation_failed))
+            } catch (_: SecurityException) {
+                vm.notifyMessage(context.getString(R.string.unity_operation_failed))
+            } catch (_: Exception) {
+                vm.notifyMessage(context.getString(R.string.unity_operation_failed))
+            }
+        }
+    }
+
+    val jsonSavePicker = rememberLauncherForActivityResult(
+        ActivityResultContracts.CreateDocument("application/json"),
+    ) { uri ->
+        if (uri != null) vm.saveUnifiedJson(uri, context.contentResolver)
+    }
+
+    LaunchedEffect(state.jsonExportRequest?.id) {
+        state.jsonExportRequest?.let { request ->
+            // Consume first so configuration changes or returning from the picker cannot replay it.
+            vm.consumeJsonExportRequest(request.id)
+            try {
+                jsonSavePicker.launch(request.suggestedName)
             } catch (_: ActivityNotFoundException) {
                 vm.notifyMessage(context.getString(R.string.unity_operation_failed))
             } catch (_: SecurityException) {
@@ -649,6 +666,7 @@ fun UnityAssetScreen(
                                     onSetEdit = vm::setUnifiedEdit,
                                     onClearEdits = vm::clearUnifiedEdits,
                                     onApply = vm::applyUnifiedEdits,
+                                    onExportAllJson = vm::exportUnifiedJson,
                                     onApplyPersianUnified = { vm.applyUnifiedPersian(context.contentResolver) },
                                 )
                             }
@@ -1554,14 +1572,12 @@ private fun UnifiedLocalizationActions(
     onSetEdit: (String, String) -> Unit,
     onClearEdits: () -> Unit,
     onApply: () -> Unit,
+    onExportAllJson: () -> Unit,
     onApplyPersianUnified: () -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
     var tableFilter by remember { mutableStateOf<String?>(null) }
     var onlyEdited by remember { mutableStateOf(false) }
-    var copied by remember { mutableStateOf(false) }
-    val copyScope = rememberCoroutineScope()
-    val copyContext = LocalContext.current
 
     val allSources = sourcesByEntry.values.flatten()
     val allCodes = remember(allSources) {
@@ -1796,27 +1812,11 @@ private fun UnifiedLocalizationActions(
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
             OutlinedButton(
-                onClick = {
-                    val clipboard = copyContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
-                    clipboard.setPrimaryClip(
-                        ClipData.newPlainText("I2 tables", UnityLocalizationJson.toJsonAll(sourcesByEntry)),
-                    )
-                    copied = true
-                    copyScope.launch {
-                        delay(2000)
-                        copied = false
-                    }
-                },
+                onClick = onExportAllJson,
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
-                Text(
-                    if (copied) {
-                        stringResource(R.string.unity_unified_copied)
-                    } else {
-                        stringResource(R.string.unity_unified_copy_all)
-                    },
-                )
+                Text(stringResource(R.string.unity_unified_export_all))
             }
             Button(
                 onClick = onApplyPersianUnified,
