@@ -636,11 +636,15 @@ fun UnityAssetScreen(
                                     plans = unifiedPlans,
                                     sharedCounts = sharedCounts,
                                     unifiedStatusText = state.unifiedStatusText,
+                                    persianFilesPicked = state.persianBaseFallbackUri != null &&
+                                        state.persianSceneBundleUri != null &&
+                                        state.persianFontUri != null,
                                     onSelectSourceLanguage = vm::setUnifiedSourceLanguage,
                                     onSelectTargetLanguage = vm::setUnifiedTargetLanguage,
                                     onSetEdit = vm::setUnifiedEdit,
                                     onClearEdits = vm::clearUnifiedEdits,
                                     onApply = vm::applyUnifiedEdits,
+                                    onApplyPersianUnified = { vm.applyUnifiedPersian(context.contentResolver) },
                                 )
                             }
                         }
@@ -1539,11 +1543,13 @@ private fun UnifiedLocalizationActions(
     plans: List<UnifiedTablePlan>,
     sharedCounts: Map<String, Int>,
     unifiedStatusText: String?,
+    persianFilesPicked: Boolean,
     onSelectSourceLanguage: (String) -> Unit,
     onSelectTargetLanguage: (String) -> Unit,
     onSetEdit: (String, String) -> Unit,
     onClearEdits: () -> Unit,
     onApply: () -> Unit,
+    onApplyPersianUnified: () -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
     var tableFilter by remember { mutableStateOf<String?>(null) }
@@ -1778,6 +1784,17 @@ private fun UnifiedLocalizationActions(
             }
             Text(
                 stringResource(R.string.unity_unified_plain_note),
+                style = MaterialTheme.typography.bodySmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+            )
+            Button(
+                onClick = onApplyPersianUnified,
+                enabled = !busy && unifiedTargetCode != null && persianFilesPicked,
+            ) {
+                Text(stringResource(R.string.unity_unified_persian_apply))
+            }
+            Text(
+                stringResource(R.string.unity_unified_persian_note),
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
