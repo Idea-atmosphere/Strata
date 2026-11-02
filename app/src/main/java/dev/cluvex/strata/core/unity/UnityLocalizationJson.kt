@@ -44,6 +44,72 @@ object UnityLocalizationJson {
     }
 
     /**
+     * Parses a file holding one or more flat-I2 JSON objects (the
+     * shape [toJsonAll] writes: objects separated by whitespace, a
+     * blank line in practice). A leading BOM is tolerated. Throws
+     * [IllegalArgumentException] on malformed input or a
+     * non-object value.
+     */
+    fun parseAll(text: String): List<JsonValue.Obj> {
+        val parser = Parser(text.removePrefix("\uFEFF"))
+        return parser.parseDocuments()
+    }
+
+    /** One flat-I2 JSON object, as found in an export file. */
+    data class ParsedJsonTable(
+        /** m_Name, null when the object has none (it then cannot be routed to a table). */
+        val name: String?,
+        /** #languages index -> language-code mapping, null when the object has none (positional fallback). */
+        val languageCodes: List<String>?,
+        /** Terms in file order; values are keyed by language index, not code. */
+        val terms: List<ParsedJsonTerm>,
+    )
+
+    data class ParsedJsonTerm(
+        val key: String,
+        val valuesByIndex: Map<Int, String>,
+    )
+
+    /**
+     * Extracts the tables of a multi-object file. Objects without
+     * any mSource.mTerms term are kept with an empty term list
+     * (the import planner skips them); a non-scalar term/language
+     * value throws, like [toTsv].
+     */
+    fun parsedTables(objects: List<JsonValue.Obj>): List<ParsedJsonTable> {
+        val termPattern = Regex("""mSource\.mTerms\[(\d+)\]\.Term""")
+        val languagePattern = Regex("""mSource\.mTerms\[(\d+)\]\.Languages\[(\d+)\]""")
+        return objects.map { obj ->
+            val name = (obj.entries["m_Name"] as? JsonValue.Str)?.value
+            // A malformed #languages (not an array of strings) falls
+            // back to positional mapping, like a file without one.
+            val languageCodes = (obj.entries["#languages"] as? JsonValue.Arr)?.let { arr ->
+                val codes = arr.items.map { (it as? JsonValue.Str)?.value }
+                if (codes.any { it == null }) null else codes.filterNotNull()
+            }
+            val keys = HashMap<Int, String>()
+            val values = HashMap<Int, MutableMap<Int, String>>()
+            for ((entryKey, entryValue) in obj.entries) {
+                termPattern.matchEntire(entryKey)?.let { match ->
+                    keys[match.groupValues[1].toInt()] = scalar(entryKey, entryValue)
+                }
+                languagePattern.matchEntire(entryKey)?.let { match ->
+                    val termIndex = match.groupValues[1].toInt()
+                    val languageIndex = match.groupValues[2].toInt()
+                    values.getOrPut(termIndex) { HashMap() }[languageIndex] = scalar(entryKey, entryValue)
+                }
+            }
+            ParsedJsonTable(
+                name = name,
+                languageCodes = languageCodes,
+                terms = keys.keys.sorted().mapNotNull { termIndex ->
+                    keys[termIndex]?.let { ParsedJsonTerm(it, values[termIndex].orEmpty()) }
+                },
+            )
+        }
+    }
+
+    /**
      * Converts a flat I2 JSON document to TSV text for [UnityLocalizationTsv.planImport].
      * Throws [IllegalArgumentException] when the document is not a JSON object, has no
      * `mSource.mTerms` entries, or holds a non-scalar term/language value.
@@ -122,6 +188,18 @@ object UnityLocalizationJson {
             skipWhitespace()
             if (pos != text.length) fail("Trailing characters after the JSON document")
             return value
+        }
+
+        fun parseDocuments(): List<JsonValue.Obj> {
+            val documents = ArrayList<JsonValue.Obj>()
+            while (true) {
+                skipWhitespace()
+                if (pos >= text.length) break
+                val value = parseValue()
+                if (value !is JsonValue.Obj) fail("Expected a JSON object")
+                documents += value
+            }
+            return documents
         }
 
         private fun fail(message: String): Nothing =
@@ -298,22 +376,154 @@ object UnityLocalizationJson {
      * are emitted as-is (UTF-8), never as \u escapes, so the text
      * stays readable.
      */
-    fun toJson(source: LocalizationSource): String {
+    fun toJson(source: LocalizationSource): String =
+        buildJson(source, source.languages.indices.toList())
+
+    /**
+     * The same table with only one language's values (Term keys
+     * plus that language's index only). Returns null when the
+     * table has no such language. The full #languages list is
+     * still emitted, so the index stays mappable on import.
+     */
+    fun toJsonForLanguage(source: LocalizationSource, languageCode: String): String? {
+        val index = source.languageIndex(languageCode)
+        if (index < 0) return null
+        return buildJson(source, listOf(index))
+    }
+
+    private fun buildJson(source: LocalizationSource, languageIndices: List<Int>): String {
         val entries = ArrayList<String>()
         entries += "\"m_Name\": " + escapeJson(source.name)
         entries += "\"#languages\": [" + source.languages.joinToString(", ") { escapeJson(it.code) } + "]"
         for ((n, term) in source.terms.withIndex()) {
             entries += "\"mSource.mTerms[$n].Term\": " + escapeJson(term.key)
-            for ((i, value) in term.values.withIndex()) {
-                entries += "\"mSource.mTerms[$n].Languages[$i]\": " + escapeJson(value ?: "")
+            for (i in languageIndices) {
+                entries += "\"mSource.mTerms[$n].Languages[$i]\": " +
+                    escapeJson(term.values.getOrNull(i) ?: "")
             }
         }
         return "{\n  " + entries.joinToString(",\n  ") + "\n}"
     }
 
-    /** All tables, each a standalone flat JSON object, separated by a blank line. */
-    fun toJsonAll(sourcesByEntry: Map<String, List<LocalizationSource>>): String {
-        return sourcesByEntry.values.flatten().joinToString("\n\n") { toJson(it) }
+    /**
+     * All tables, each a standalone flat JSON object, separated by
+     * a blank line. With [languageCode] set, only that language's
+     * values are emitted, and tables without that language are
+     * skipped entirely.
+     */
+    fun toJsonAll(
+        sourcesByEntry: Map<String, List<LocalizationSource>>,
+        languageCode: String? = null,
+    ): String {
+        val tables = sourcesByEntry.values.flatten()
+        return if (languageCode == null) {
+            tables.joinToString("\n\n") { toJson(it) }
+        } else {
+            tables.mapNotNull { toJsonForLanguage(it, languageCode) }.joinToString("\n\n")
+        }
+    }
+
+    /** One importable plan: a discovered table plus its validated plan. */
+    data class JsonImportPlan(
+        val entryName: String,
+        val source: LocalizationSource,
+        val plan: LocalizationImportPlan,
+    )
+
+    /** Planning outcome for a multi-table JSON import. */
+    data class JsonImportResult(
+        val plans: List<JsonImportPlan>,
+        val placeholderSkippedTerms: Int,
+        val unknownTables: List<String>,
+        val unknownLanguages: List<String>,
+        val unknownKeyTerms: Int,
+    )
+
+    /**
+     * Plans a multi-table JSON import. Each parsed table is routed
+     * by m_Name to every discovered table with that name; each
+     * value is routed by language CODE (#languages mapping,
+     * positional fallback when absent), so an edited value
+     * replaces only its own language column, never the others.
+     * One plan per table covers all its edited codes at once, so
+     * a table edited in two languages still writes once.
+     * Placeholder validation uses [sourceCode] (or the table's
+     * first language when null), exactly like the per-table
+     * import. Empty values mean "keep old value" and are not
+     * planned. Only plans that can apply are returned.
+     */
+    fun planImportAll(
+        sourcesByEntry: Map<String, List<LocalizationSource>>,
+        parsed: List<ParsedJsonTable>,
+        sourceCode: String?,
+        options: UnityTextTransformOptions = UnityTextTransformOptions(),
+    ): JsonImportResult {
+        val plans = ArrayList<JsonImportPlan>()
+        val unknownTables = ArrayList<String>()
+        val unknownLanguages = ArrayList<String>()
+        var placeholderSkipped = 0
+        var unknownKeys = 0
+        for (table in parsed) {
+            if (table.terms.isEmpty()) continue
+            val name = table.name
+            if (name == null) {
+                unknownTables += "(no m_Name)"
+                continue
+            }
+            val matched = ArrayList<Pair<String, LocalizationSource>>()
+            for ((entryName, sources) in sourcesByEntry) {
+                for (source in sources) {
+                    if (source.name == name) matched += entryName to source
+                }
+            }
+            if (matched.isEmpty()) {
+                unknownTables += name
+                continue
+            }
+            for ((entryName, source) in matched) {
+                val editsByCode = LinkedHashMap<String, LinkedHashMap<String, String>>()
+                val knownKeys = source.terms.map { it.key }.toSet()
+                for (term in table.terms) {
+                    if (term.key !in knownKeys) {
+                        unknownKeys++
+                        continue
+                    }
+                    for ((languageIndex, value) in term.valuesByIndex) {
+                        if (value.isEmpty()) continue
+                        val code = table.languageCodes?.getOrNull(languageIndex)
+                            ?: source.languages.getOrNull(languageIndex)?.code
+                        if (code == null) continue
+                        if (source.languageIndex(code) < 0) {
+                            unknownLanguages += "$name:$code"
+                            continue
+                        }
+                        editsByCode.getOrPut(code) { LinkedHashMap() }[term.key] = value
+                    }
+                }
+                if (editsByCode.isEmpty()) continue
+                val codes = editsByCode.keys.toList()
+                val tsv = buildString {
+                    appendRow(listOf("key") + codes)
+                    for (term in source.terms) {
+                        val rowEdits = codes.map { editsByCode.getValue(it)[term.key] }
+                        if (rowEdits.all { it == null }) continue
+                        appendRow(listOf(term.key) + rowEdits.map { it.orEmpty() })
+                    }
+                }
+                val plan = UnityLocalizationTsv.planImport(source, tsv, options, sourceCode)
+                placeholderSkipped += plan.placeholderFailureCount
+                if (plan.canApply) {
+                    plans += JsonImportPlan(entryName, source, plan)
+                }
+            }
+        }
+        return JsonImportResult(
+            plans = plans,
+            placeholderSkippedTerms = placeholderSkipped,
+            unknownTables = unknownTables.distinct(),
+            unknownLanguages = unknownLanguages.distinct(),
+            unknownKeyTerms = unknownKeys,
+        )
     }
 
     /** Minimal JSON string escaper: quote, backslash, control chars; nothing else escaped. */

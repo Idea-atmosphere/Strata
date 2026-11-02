@@ -116,4 +116,14 @@
     <string name="unity_unified_persian_note">Bakes one fallback for every word in all tables and writes PUA text into every table. Needs the 3 files picked in the Persian section (original base fallback, scene bundle, Persian font). Static-font screens (menus, subtitles) also need their prefabs repointed, one by one in the Persian prefab section.</string>
     <string name="unity_unified_export_all">Export all tables (JSON)</string>
     <string name="unity_unified_json_exported">JSON exported to %1$s</string>
+    <string name="unity_unified_export_language_label">Export language</string>
+    <string name="unity_unified_export_all_languages">All</string>
+    <string name="unity_unified_import_all">Import all tables (JSON)</string>
+    <string name="unity_unified_import_summary">Imported %1$d terms into %2$d tables</string>
+    <string name="unity_unified_import_skipped">Skipped: %1$d terms</string>
+    <string name="unity_unified_import_unknown_tables">Unknown tables: %1$s</string>
+    <string name="unity_unified_import_unknown_languages">Unknown languages: %1$s</string>
+    <string name="unity_unified_import_unknown_keys">Unknown keys: %1$d</string>
+    <string name="unity_unified_import_no_tables">No importable tables found in the file</string>
+    <string name="unity_unified_import_partial">Import partial: %1$d tables applied, %2$d failed</string>
 </resources>

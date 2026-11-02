@@ -48,4 +48,14 @@
     <string name="unity_unified_persian_note">برای همه‌ی کلمات همه‌ی جدول‌ها یک fallback می‌سازد و متن PUA را در همه‌ی جدول‌ها می‌نویسد. به ۳ فایل انتخاب‌شده در بخش فارسی نیاز دارد (fallback اصلی، باندل صحنه، فونت فارسی). صفحه‌های با فونت استاتیک (منوها، زیرنویس) به repoint پریفب هم نیاز دارند، یکی‌یکی در بخش پریفب فارسی.</string>
     <string name="unity_unified_export_all">خروجی همه‌ی جدول‌ها (JSON)</string>
     <string name="unity_unified_json_exported">فایل JSON در %1$s ذخیره شد</string>
+    <string name="unity_unified_export_language_label">زبان خروجی</string>
+    <string name="unity_unified_export_all_languages">همه</string>
+    <string name="unity_unified_import_all">وارد کردن همه‌ی جدول‌ها (JSON)</string>
+    <string name="unity_unified_import_summary">%1$d ترم در %2$d جدول وارد شد</string>
+    <string name="unity_unified_import_skipped">رد شده: %1$d ترم</string>
+    <string name="unity_unified_import_unknown_tables">جدول‌های ناشناخته: %1$s</string>
+    <string name="unity_unified_import_unknown_languages">زبان‌های ناشناخته: %1$s</string>
+    <string name="unity_unified_import_unknown_keys">کلیدهای ناشناخته: %1$d</string>
+    <string name="unity_unified_import_no_tables">در فایل جدول قابل وارد کردنی پیدا نشد</string>
+    <string name="unity_unified_import_partial">وارد کردن ناقص: %1$d جدول اعمال شد، %2$d جدول ناموفق بود</string>
 </resources>

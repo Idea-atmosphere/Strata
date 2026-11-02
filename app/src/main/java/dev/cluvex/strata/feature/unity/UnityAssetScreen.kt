@@ -232,6 +232,10 @@ fun UnityAssetScreen(
         if (uri != null) vm.importLocalizationTsv(uri, context.contentResolver)
     }
 
+    val jsonImportPicker = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
+        if (uri != null) vm.importUnifiedJson(uri, context.contentResolver)
+    }
+
     LaunchedEffect(state.tsvExportRequest?.id) {
         state.tsvExportRequest?.let { request ->
             // Consume first so configuration changes or returning from the picker cannot replay it.
@@ -655,6 +659,7 @@ fun UnityAssetScreen(
                                     unifiedEdits = state.unifiedEdits,
                                     unifiedSourceCode = state.unifiedSourceCode,
                                     unifiedTargetCode = state.unifiedTargetCode,
+                                    unifiedExportLanguageCode = state.unifiedExportLanguageCode,
                                     plans = unifiedPlans,
                                     sharedCounts = sharedCounts,
                                     unifiedStatusText = state.unifiedStatusText,
@@ -663,10 +668,16 @@ fun UnityAssetScreen(
                                         state.persianFontUri != null,
                                     onSelectSourceLanguage = vm::setUnifiedSourceLanguage,
                                     onSelectTargetLanguage = vm::setUnifiedTargetLanguage,
+                                    onSelectExportLanguage = vm::setUnifiedExportLanguage,
                                     onSetEdit = vm::setUnifiedEdit,
                                     onClearEdits = vm::clearUnifiedEdits,
                                     onApply = vm::applyUnifiedEdits,
                                     onExportAllJson = vm::exportUnifiedJson,
+                                    onImportJson = {
+                                        jsonImportPicker.launch(
+                                            arrayOf("application/json", "text/*", "application/octet-stream"),
+                                        )
+                                    },
                                     onApplyPersianUnified = { vm.applyUnifiedPersian(context.contentResolver) },
                                 )
                             }
@@ -1563,16 +1574,19 @@ private fun UnifiedLocalizationActions(
     unifiedEdits: Map<String, String>,
     unifiedSourceCode: String?,
     unifiedTargetCode: String?,
+    unifiedExportLanguageCode: String?,
     plans: List<UnifiedTablePlan>,
     sharedCounts: Map<String, Int>,
     unifiedStatusText: String?,
     persianFilesPicked: Boolean,
     onSelectSourceLanguage: (String) -> Unit,
     onSelectTargetLanguage: (String) -> Unit,
+    onSelectExportLanguage: (String?) -> Unit,
     onSetEdit: (String, String) -> Unit,
     onClearEdits: () -> Unit,
     onApply: () -> Unit,
     onExportAllJson: () -> Unit,
+    onImportJson: () -> Unit,
     onApplyPersianUnified: () -> Unit,
 ) {
     var search by remember { mutableStateOf("") }
@@ -1811,12 +1825,40 @@ private fun UnifiedLocalizationActions(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            Text(stringResource(R.string.unity_unified_export_language_label), style = MaterialTheme.typography.labelMedium)
+            LazyRow(horizontalArrangement = Arrangement.spacedBy(4.dp)) {
+                item {
+                    if (unifiedExportLanguageCode == null) {
+                        Button(onClick = { onSelectExportLanguage(null) }, enabled = !busy) {
+                            Text(stringResource(R.string.unity_unified_export_all_languages), maxLines = 1)
+                        }
+                    } else {
+                        OutlinedButton(onClick = { onSelectExportLanguage(null) }, enabled = !busy) {
+                            Text(stringResource(R.string.unity_unified_export_all_languages), maxLines = 1)
+                        }
+                    }
+                }
+                items(allCodes, key = { "exp:$it" }) { code ->
+                    if (code == unifiedExportLanguageCode) {
+                        Button(onClick = { onSelectExportLanguage(code) }, enabled = !busy) { Text(code, maxLines = 1) }
+                    } else {
+                        OutlinedButton(onClick = { onSelectExportLanguage(code) }, enabled = !busy) { Text(code, maxLines = 1) }
+                    }
+                }
+            }
             OutlinedButton(
                 onClick = onExportAllJson,
                 enabled = !busy,
                 modifier = Modifier.fillMaxWidth(),
             ) {
                 Text(stringResource(R.string.unity_unified_export_all))
+            }
+            OutlinedButton(
+                onClick = onImportJson,
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(stringResource(R.string.unity_unified_import_all))
             }
             Button(
                 onClick = onApplyPersianUnified,

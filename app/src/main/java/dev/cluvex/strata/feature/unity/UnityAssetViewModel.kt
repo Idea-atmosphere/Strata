@@ -258,6 +258,8 @@ data class UnityAssetUiState(
     val unifiedSourceCode: String? = null,
     val unifiedTargetCode: String? = null,
     val unifiedStatusText: String? = null,
+    /** Export language for the all-tables JSON; null means all languages. */
+    val unifiedExportLanguageCode: String? = null,
 ) {
     val outputNeedsSigning: Boolean
         get() = outputSigningHandoff == UnityApkSigningHandoffState.SIGNING_REQUIRED
@@ -1196,7 +1198,7 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
         _state.update { it.copy(busy = true, message = null) }
         viewModelScope.launch {
             try {
-                val text = UnityLocalizationJson.toJsonAll(sources)
+                val text = UnityLocalizationJson.toJsonAll(sources, _state.value.unifiedExportLanguageCode)
                 val output = runInterruptible(Dispatchers.IO) {
                     File(dir, "i2-tables-${System.nanoTime()}.json").apply { writeText(text) }
                 }
@@ -1288,6 +1290,178 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
                 throw error
             } catch (error: Throwable) {
                 discardCreatedDocument(resolver, uri)
+                _state.update { it.copy(busy = false, message = localizationFailureMessage(error)) }
+            }
+        }
+    }
+
+    /**
+     * Imports a multi-table JSON file (the export shape): each
+     * object is routed by m_Name, each value by language code, so
+     * edited values replace only their own language column and
+     * the other languages are untouched. Writes per entry with
+     * round-trip verification, like [applyUnifiedEdits]. Blocked
+     * while a Persian Apply is staged (plain values would
+     * clobber staged PUA text).
+     */
+    fun importUnifiedJson(uri: Uri, resolver: ContentResolver) {
+        val doc = document ?: return
+        val dir = stageDir ?: return
+        val state = _state.value
+        if (state.busy) return
+        if (state.localizationSources.isEmpty()) return
+        if (state.persianApplied) {
+            _state.update {
+                it.copy(message = getApplication<Application>().getString(R.string.unity_persian_plain_apply_blocked))
+            }
+            return
+        }
+        _state.update { it.copy(busy = true, message = null) }
+        viewModelScope.launch {
+            var staged: File? = null
+            try {
+                val result = runInterruptible(Dispatchers.IO) {
+                    val file = stageImportedLocalizationTsv(dir) {
+                        resolver.openInputStream(uri) ?: throw IOException("JSON import source is unavailable")
+                    }
+                    staged = file
+                    try {
+                        val text = readLocalizationTsvUtf8(file)
+                        val parsed = UnityLocalizationJson.parsedTables(UnityLocalizationJson.parseAll(text))
+                        UnityLocalizationJson.planImportAll(
+                            sourcesByEntry = state.localizationSources,
+                            parsed = parsed,
+                            sourceCode = state.unifiedSourceCode,
+                            options = state.textTransformOptions,
+                        )
+                    } catch (error: Throwable) {
+                        file.delete()
+                        throw error
+                    }
+                }
+                // The staged import copy is no longer needed; plans are in memory.
+                staged?.delete()
+                staged = null
+                val plans = result.plans
+                val app = getApplication<Application>()
+                if (plans.isEmpty()) {
+                    val status = buildString {
+                        if (result.unknownTables.isNotEmpty()) {
+                            append(app.getString(R.string.unity_unified_import_unknown_tables, result.unknownTables.joinToString(", ")))
+                        }
+                        if (result.unknownLanguages.isNotEmpty()) {
+                            if (isNotEmpty()) append(" · ")
+                            append(app.getString(R.string.unity_unified_import_unknown_languages, result.unknownLanguages.joinToString(", ")))
+                        }
+                    }
+                    _state.update {
+                        it.copy(
+                            busy = false,
+                            unifiedStatusText = status.ifEmpty { app.getString(R.string.unity_unified_import_no_tables) },
+                            message = app.getString(R.string.unity_unified_import_no_tables),
+                        )
+                    }
+                    return@launch
+                }
+                val plansByEntry = plans.groupBy { it.entryName }
+                _state.update {
+                    it.copy(
+                        localizationRoundTripStatus = UnityLocalizationRoundTripStatus.RUNNING,
+                        localizationRoundTripDetail = null,
+                    )
+                }
+                val successes = LinkedHashMap<String, Pair<File, List<LocalizationSource>>>()
+                val failures = ArrayList<Pair<String, Throwable>>()
+                for ((entryName, entryPlans) in plansByEntry) {
+                    val entry = doc.summary.entries.firstOrNull { it.name == entryName }
+                    if (entry == null) {
+                        failures += entryName to UnityFormatException("Bundle entry was not found: $entryName")
+                        continue
+                    }
+                    val tables = state.localizationSources[entryName].orEmpty()
+                    val updatedById = entryPlans.associate { it.source.origin.tableId to it.plan.updated!! }
+                    val rewritten = tables.map { table -> updatedById[table.origin.tableId] ?: table }
+                    val stagedEntry = File(
+                        dir,
+                        "localization-${entry.name.hashCode().toUInt().toString(16)}-${System.nanoTime()}.bin",
+                    )
+                    try {
+                        runInterruptible(Dispatchers.IO) {
+                            val existingEntryReplacement = state.replacements[entry.name]
+                            if (existingEntryReplacement != null) {
+                                UnityLocalizationOverlay.write(existingEntryReplacement, rewritten, stagedEntry, dir)
+                            } else {
+                                doc.writeLocalizationReplacement(entry, rewritten, stagedEntry)
+                            }
+                            verifyLocalizationRoundTrip(stagedEntry, rewritten, dir)
+                        }
+                        successes[entryName] = stagedEntry to rewritten
+                    } catch (e: CancellationException) {
+                        stagedEntry.delete()
+                        successes.values.forEach { it.first.delete() }
+                        throw e
+                    } catch (e: Exception) {
+                        stagedEntry.delete()
+                        failures += entryName to e
+                    }
+                }
+                val newSources = state.localizationSources.toMutableMap()
+                for ((entryName, pair) in successes) newSources[entryName] = pair.second
+                val appliedPlans = plans.filter { it.entryName in successes }
+                val appliedTerms = appliedPlans.sumOf { it.plan.changes.size }
+                val appliedCodes = appliedPlans
+                    .flatMap { it.plan.changes.map { change -> change.languageCode } }
+                    .distinct().sorted()
+                val status = buildString {
+                    append(app.getString(R.string.unity_unified_import_summary, appliedTerms, appliedPlans.size))
+                    if (appliedCodes.isNotEmpty()) append(" (${appliedCodes.joinToString(", ")})")
+                    if (result.placeholderSkippedTerms > 0) {
+                        append(" · ").append(app.getString(R.string.unity_unified_import_skipped, result.placeholderSkippedTerms))
+                    }
+                    if (result.unknownTables.isNotEmpty()) {
+                        append(" · ").append(app.getString(R.string.unity_unified_import_unknown_tables, result.unknownTables.joinToString(", ")))
+                    }
+                    if (result.unknownLanguages.isNotEmpty()) {
+                        append(" · ").append(app.getString(R.string.unity_unified_import_unknown_languages, result.unknownLanguages.joinToString(", ")))
+                    }
+                    if (result.unknownKeyTerms > 0) {
+                        append(" · ").append(app.getString(R.string.unity_unified_import_unknown_keys, result.unknownKeyTerms))
+                    }
+                }
+                val message = if (failures.isEmpty()) status else localizationFailureMessage(failures.first().second)
+                _state.update {
+                    withTranslationDerived(
+                        it.copy(
+                            busy = false,
+                            replacements = it.replacements + successes.mapValues { entry -> entry.value.first },
+                            localizationReplacementEntries = it.localizationReplacementEntries + successes.keys,
+                            localizationSources = it.localizationSources + newSources.filterKeys { name -> name in successes },
+                            localizationRoundTripStatus = if (failures.isEmpty()) {
+                                UnityLocalizationRoundTripStatus.PASSED
+                            } else {
+                                UnityLocalizationRoundTripStatus.FAILED
+                            },
+                            localizationRoundTripDetail = failures.firstOrNull()?.second?.message,
+                            unifiedStatusText = if (failures.isEmpty()) {
+                                status
+                            } else {
+                                app.getString(R.string.unity_unified_import_partial, successes.size, failures.size)
+                            },
+                            message = message,
+                        ),
+                    )
+                }
+            } catch (error: CancellationException) {
+                staged?.delete()
+                _state.update {
+                    it.copy(
+                        busy = false,
+                        message = getApplication<Application>().getString(R.string.unity_operation_cancelled),
+                    )
+                }
+                throw error
+            } catch (error: Throwable) {
+                staged?.delete()
                 _state.update { it.copy(busy = false, message = localizationFailureMessage(error)) }
             }
         }
@@ -1593,6 +1767,15 @@ class UnityAssetViewModel(app: Application) : AndroidViewModel(app) {
             .any { it.languageIndex(code) >= 0 }
         if (!known) return
         _state.update { it.copy(unifiedTargetCode = code) }
+    }
+
+    fun setUnifiedExportLanguage(code: String?) {
+        if (code != null) {
+            val known = _state.value.localizationSources.values.flatten()
+                .any { it.languageIndex(code) >= 0 }
+            if (!known) return
+        }
+        _state.update { it.copy(unifiedExportLanguageCode = code) }
     }
 
     fun setUnifiedEdit(key: String, value: String) {
