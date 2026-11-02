@@ -114,4 +114,6 @@
     <string name="unity_unified_plain_note">Edits are written as-is. Persian text renders only with a baked Persian fallback (Persian section).</string>
     <string name="unity_unified_persian_apply">Apply Persian to all tables</string>
     <string name="unity_unified_persian_note">Bakes one fallback for every word in all tables and writes PUA text into every table. Needs the 3 files picked in the Persian section (original base fallback, scene bundle, Persian font). Static-font screens (menus, subtitles) also need their prefabs repointed, one by one in the Persian prefab section.</string>
+    <string name="unity_unified_copy_all">Copy all tables (JSON)</string>
+    <string name="unity_unified_copied">Copied!</string>
 </resources>

@@ -46,4 +46,6 @@
     <string name="unity_unified_plain_note">ویرایش‌ها همان‌طور که هستند نوشته می‌شوند. متن فارسی فقط با fallback بیک‌شده‌ی فارسی (بخش فارسی) در بازی دیده می‌شود.</string>
     <string name="unity_unified_persian_apply">اعمال فارسی در همه‌ی جدول‌ها</string>
     <string name="unity_unified_persian_note">برای همه‌ی کلمات همه‌ی جدول‌ها یک fallback می‌سازد و متن PUA را در همه‌ی جدول‌ها می‌نویسد. به ۳ فایل انتخاب‌شده در بخش فارسی نیاز دارد (fallback اصلی، باندل صحنه، فونت فارسی). صفحه‌های با فونت استاتیک (منوها، زیرنویس) به repoint پریفب هم نیاز دارند، یکی‌یکی در بخش پریفب فارسی.</string>
+    <string name="unity_unified_copy_all">کپی همه‌ی جدول‌ها (JSON)</string>
+    <string name="unity_unified_copied">کپی شد!</string>
 </resources>

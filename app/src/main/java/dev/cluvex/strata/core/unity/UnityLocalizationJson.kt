@@ -283,4 +283,62 @@ object UnityLocalizationJson {
             return JsonValue.Num(text.substring(start, pos))
         }
     }
+
+    /**
+     * Serializes one table to the flat I2 JSON shape the import
+     * accepts: m_Name plus mSource.mTerms[N].Term and
+     * mSource.mTerms[N].Languages[i] for every language index, in
+     * term order. A "#languages" entry documents the index ->
+     * language-code mapping of the source table (import ignores
+     * unknown top-level keys, so it round-trips harmlessly); it
+     * exists so a reader of a copied file knows which index is
+     * which language. Null values become "" (import treats an
+     * empty cell as "keep old value"). Keys and values are
+     * JSON-escaped; other characters (including Persian/Arabic)
+     * are emitted as-is (UTF-8), never as \u escapes, so the text
+     * stays readable.
+     */
+    fun toJson(source: LocalizationSource): String {
+        val entries = ArrayList<String>()
+        entries += "\"m_Name\": " + escapeJson(source.name)
+        entries += "\"#languages\": [" + source.languages.joinToString(", ") { escapeJson(it.code) } + "]"
+        for ((n, term) in source.terms.withIndex()) {
+            entries += "\"mSource.mTerms[$n].Term\": " + escapeJson(term.key)
+            for ((i, value) in term.values.withIndex()) {
+                entries += "\"mSource.mTerms[$n].Languages[$i]\": " + escapeJson(value ?: "")
+            }
+        }
+        return "{\n  " + entries.joinToString(",\n  ") + "\n}"
+    }
+
+    /** All tables, each a standalone flat JSON object, separated by a blank line. */
+    fun toJsonAll(sourcesByEntry: Map<String, List<LocalizationSource>>): String {
+        return sourcesByEntry.values.flatten().joinToString("\n\n") { toJson(it) }
+    }
+
+    /** Minimal JSON string escaper: quote, backslash, control chars; nothing else escaped. */
+    private fun escapeJson(value: String): String {
+        val sb = StringBuilder(value.length + 2)
+        sb.append('"')
+        for (ch in value) {
+            when (ch) {
+                '"' -> sb.append("\\\"")
+                '\\' -> sb.append("\\\\")
+                '\n' -> sb.append("\\n")
+                '\r' -> sb.append("\\r")
+                '\t' -> sb.append("\\t")
+                '\b' -> sb.append("\\b")
+                '\u000C' -> sb.append("\\f")
+                else -> {
+                    if (ch.code < 0x20) {
+                        sb.append("\\u").append(ch.code.toString(16).padStart(4, '0'))
+                    } else {
+                        sb.append(ch)
+                    }
+                }
+            }
+        }
+        sb.append('"')
+        return sb.toString()
+    }
 }

@@ -1,6 +1,9 @@
 package dev.cluvex.strata.feature.unity
 
 import android.content.ActivityNotFoundException
+import android.content.ClipData
+import android.content.ClipboardManager
+import android.content.Context
 import android.net.Uri
 import android.os.Environment
 import android.provider.DocumentsContract
@@ -67,6 +70,7 @@ import dev.cluvex.strata.core.unity.LocalizationImportIssueKind
 import dev.cluvex.strata.core.unity.LocalizationImportPlan
 import dev.cluvex.strata.core.unity.LocalizationSource
 import dev.cluvex.strata.core.unity.UnifiedTablePlan
+import dev.cluvex.strata.core.unity.UnityLocalizationJson
 import dev.cluvex.strata.core.unity.UnityUnifiedLocalization
 import dev.cluvex.strata.core.unity.UnityBundleDocument
 import dev.cluvex.strata.core.unity.UnityBundleEntry
@@ -88,6 +92,7 @@ import dev.cluvex.strata.core.util.Formatters
 import dev.cluvex.strata.ui.isolated
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.runInterruptible
@@ -1554,6 +1559,9 @@ private fun UnifiedLocalizationActions(
     var search by remember { mutableStateOf("") }
     var tableFilter by remember { mutableStateOf<String?>(null) }
     var onlyEdited by remember { mutableStateOf(false) }
+    var copied by remember { mutableStateOf(false) }
+    val copyScope = rememberCoroutineScope()
+    val copyContext = LocalContext.current
 
     val allSources = sourcesByEntry.values.flatten()
     val allCodes = remember(allSources) {
@@ -1787,6 +1795,29 @@ private fun UnifiedLocalizationActions(
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
             )
+            OutlinedButton(
+                onClick = {
+                    val clipboard = copyContext.getSystemService(Context.CLIPBOARD_SERVICE) as ClipboardManager
+                    clipboard.setPrimaryClip(
+                        ClipData.newPlainText("I2 tables", UnityLocalizationJson.toJsonAll(sourcesByEntry)),
+                    )
+                    copied = true
+                    copyScope.launch {
+                        delay(2000)
+                        copied = false
+                    }
+                },
+                enabled = !busy,
+                modifier = Modifier.fillMaxWidth(),
+            ) {
+                Text(
+                    if (copied) {
+                        stringResource(R.string.unity_unified_copied)
+                    } else {
+                        stringResource(R.string.unity_unified_copy_all)
+                    },
+                )
+            }
             Button(
                 onClick = onApplyPersianUnified,
                 enabled = !busy && unifiedTargetCode != null && persianFilesPicked,
